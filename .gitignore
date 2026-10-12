@@ -1,0 +1,19 @@
+# === 绝不提交的敏感文件 ===
+# PixInsight 签名密钥(私钥!)
+*.xssk
+# 模块签名文件(绑定许可证)
+*.xsgn
+
+# === 构建产物 ===
+build/
+dist/
+*.o
+*.a
+*.dylib
+
+# === 日志与系统文件 ===
+*.log
+.DS_Store
+
+# internal notes (not for the repository)
+PIPELINE.md
