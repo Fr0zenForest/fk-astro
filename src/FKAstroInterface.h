@@ -4,11 +4,11 @@
  * fk-astro — FKAstroInference custom process interface
  *
  * Section layout:
- *   Model                 — model path + input/output transforms
+ *   Model                 — model path
  *   Stellar Adjustments   — Sharpen Stars, Adjust Star Halos
  *   Nonstellar Adjustments — Sharpen Nonstellar, Automatic PSF, PSF Diameter
- *   Options               — Correct Only
- *   Additional Options    — Tile Overlap, Compute Device, Verbose
+ *   Options               — Correct Only, Normalization (None / FKv1)
+ *   Additional Options    — Tile Overlap, Reflect Padding, Compute Device, Verbose
  */
 
 #include <pcl/ProcessInterface.h>
@@ -47,10 +47,6 @@ private:
    void e_PSFDiameter( pcl::NumericEdit& sender, double value );
    void e_CorrectOnly( pcl::Button& sender, pcl::Button::check_state state );
    void e_NormScheme( pcl::ComboBox& sender, int itemIndex );
-   void e_NormWp( pcl::NumericEdit& sender, double value );
-   void e_NormMt( pcl::NumericEdit& sender, double value );
-   void e_NormAt( pcl::NumericEdit& sender, double value );
-   void e_NormTb( pcl::NumericEdit& sender, double value );
    void e_ReflectPad( pcl::Button& sender, pcl::Button::check_state state );
    void e_Overlap( pcl::NumericEdit& sender, double value );
    void e_Device( pcl::ComboBox& sender, int itemIndex );
@@ -70,11 +66,7 @@ private:
    bool        m_autoPSF      = true;
    double      m_psfDiameter  = 0.0;         // [0, 8]
    bool        m_correctOnly  = true;
-   int         m_normScheme   = 0;
-   double      m_normWp       = 0.01;
-   double      m_normMt       = 0.25;
-   double      m_normAt       = 0.50;
-   double      m_normTb       = 0.00;
+   int         m_normScheme   = 0;    // 0=None 1=FKv1 (PIPELINE.md 6-param contract)
    bool        m_reflectPad   = true;
    double      m_tileOverlap  = 0.2;         // fraction [0, 0.5]
    int         m_device       = 0;
@@ -91,19 +83,6 @@ private:
       pcl::Edit            ModelPathEdit;
       pcl::PushButton      BrowseButton;
       pcl::HorizontalSizer PathSizer;
-
-      // Normalization
-      pcl::SectionBar     NormBar;
-      pcl::Control        NormSection;
-      pcl::VerticalSizer  NormSizer;
-      pcl::Label          NormSchemeLabel;
-      pcl::ComboBox       NormSchemeCombo;
-      pcl::HorizontalSizer NormSchemeSizer;
-      pcl::NumericControl NormWp;
-      pcl::NumericControl NormMt;
-      pcl::NumericControl NormAt;
-      pcl::NumericControl NormTb;
-      pcl::CheckBox       ReflectPadCheck;
 
       // Stellar Adjustments
       pcl::SectionBar     StellarBar;
@@ -125,12 +104,16 @@ private:
       pcl::Control        OptionsSection;
       pcl::VerticalSizer  OptionsSizer;
       pcl::CheckBox       CorrectOnlyCheck;
+      pcl::Label          NormLabel;
+      pcl::ComboBox       NormCombo;
+      pcl::HorizontalSizer NormSizer;
 
       // Additional Options
       pcl::SectionBar     AdditionalBar;
       pcl::Control        AdditionalSection;
       pcl::VerticalSizer  AdditionalSizer;
       pcl::NumericControl TileOverlap;
+      pcl::CheckBox       ReflectPadCheck;
       pcl::Label          DeviceLabel;
       pcl::ComboBox       DeviceCombo;
       pcl::HorizontalSizer DeviceSizer;

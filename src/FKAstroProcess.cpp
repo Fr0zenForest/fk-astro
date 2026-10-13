@@ -48,20 +48,32 @@ float ToNormFloat( S v )
 }
 
 // ---------------------------------------------------------------------------
-// Per-tile normalization: forward before the model, inverse after inference.
-// Supported schemes: arcsinh / mtf / mtf+arcsinh.
+// Per-tile normalization (PIPELINE.md §6): forward before the model, inverse
+// after inference.
+//
+//   FKv1 forward:  t = log(clamp(x,1e-12)/wp) / log(1/wp)
+//                  z = clip( MTF(t, m), 0, 1 )      with m = 0.100
+//                  y = a*z + b                      a = 1.4685, b = -0.7095
+//   FKv1 inverse:  z = clip( (y-b)/a, 0, 1 )
+//                  t = z*m / (z*(2m-1) - (m-1))
+//                  x = wp * exp( t * log(1/wp) )
+//
+// The working point wp = 0.505 * bg is derived once per image from the
+// background statistic; the curve constants are fixed by the training
+// pipeline and are not user-adjustable.
 // ---------------------------------------------------------------------------
 struct FKNormalizer
 {
-   enum Scheme { None = 0, Arcsinh = 1, Mtf = 2, MtfArcsinh = 3 };
+   enum Scheme { None = 0, FKv1 = 1 };
 
    Scheme scheme = None;
-   double wp = 0.01;   // arcsinh working point (> 0)
-   double mt = 0.25;   // MTF midtone, in (0,1)
-   double at = 0.50;   // arcsinh transition, in (mt,1)
-   double tb = 0.00;   // toe / black point, in [0,1)
+   double wp = 0.01;   // FKv1 working point, = 0.505 * background level
 
-   // PixInsight MTF: maps x == mt to 0.5.
+   static constexpr double M = 0.100;     // MTF midtone
+   static constexpr double A = 1.4685;    // affine gain
+   static constexpr double B = -0.7095;   // affine offset
+
+   // PixInsight MTF: maps x == m to 0.5.
    static double MtfFwd( double m, double x )
    {
       double d = (2.0*m - 1.0)*x - m;
@@ -72,59 +84,86 @@ struct FKNormalizer
       double d = y*(2.0*m - 1.0) + 1.0 - m;
       return (d == 0.0) ? m : y*m / d;
    }
-   static double AsinhFwd( double w, double x )
-   {
-      return std::asinh( x / w ) / std::asinh( 1.0 / w );
-   }
-   static double AsinhInv( double w, double y )
-   {
-      return w * std::sinh( y * std::asinh( 1.0 / w ) );
-   }
 
    float Forward( float x ) const
    {
-      double v = x;
-      switch ( scheme )
-      {
-      case Arcsinh:
-         v = AsinhFwd( wp, v );
-         break;
-      case Mtf:
-         v = MtfFwd( mt, v );
-         break;
-      case MtfArcsinh:
-         v = ( v > tb ) ? ( v - tb ) / ( 1.0 - tb ) : 0.0;
-         v = AsinhFwd( at, v );
-         v = MtfFwd( mt, v );
-         break;
-      default:
-         break;
-      }
-      return float( v );
+      if ( scheme != FKv1 )
+         return x;
+      const double lwp = std::log( 1.0 / wp );
+      const double xc = std::max( double( x ), 1.0e-12 );
+      const double t = std::log( xc / wp ) / lwp;
+      double z = MtfFwd( M, t );
+      if ( z < 0.0 ) z = 0.0; else if ( z > 1.0 ) z = 1.0;
+      return float( A * z + B );
    }
 
    float Inverse( float y ) const
    {
-      double v = y;
-      switch ( scheme )
-      {
-      case Arcsinh:
-         v = AsinhInv( wp, v );
-         break;
-      case Mtf:
-         v = MtfInv( mt, v );
-         break;
-      case MtfArcsinh:
-         v = MtfInv( mt, v );
-         v = AsinhInv( at, v );
-         v = v * ( 1.0 - tb ) + tb;
-         break;
-      default:
-         break;
-      }
-      return float( v );
+      if ( scheme != FKv1 )
+         return y;
+      double z = ( double( y ) - B ) / A;
+      if ( z < 0.0 ) z = 0.0; else if ( z > 1.0 ) z = 1.0;
+      double t = MtfInv( M, z );
+      if ( t < 0.0 ) t = 0.0; else if ( t > 1.0 ) t = 1.0;
+      return float( wp * std::exp( t * std::log( 1.0 / wp ) ) );
    }
 };
+
+// ---------------------------------------------------------------------------
+// Background statistic (PIPELINE.md §5): bg = P35 quantile of the normalized
+// image, measured once per image. Only positive samples are considered
+// (zero pixels are padding/synthetic); large images are stride-sampled to
+// bound the cost. Slot 5 = -log10(bg), wp = 0.505 * bg.
+// ---------------------------------------------------------------------------
+
+template <class P>
+static double FKBackgroundLevelT( const pcl::GenericImage<P>& img )
+{
+   using sample = typename P::sample;
+   const int W = img.Width(), H = img.Height(), N = img.NumberOfChannels();
+   const size_t plane = size_t( W ) * size_t( H );
+   const size_t total = plane * size_t( N );
+
+   const size_t target = size_t( 2 ) << 20;   // ~2M samples
+   const size_t stride = ( total > target ) ? ( total + target - 1 ) / target : 1;
+
+   std::vector<float> samples;
+   samples.reserve( std::min( total, target ) + stride );
+   for ( int c = 0; c < N; ++c )
+   {
+      const sample* p = img.PixelData( c );
+      for ( size_t i = 0; i < plane; i += stride )
+      {
+         float v = ToNormFloat( p[i] );
+         if ( v > 0.0f )
+            samples.push_back( v );
+      }
+   }
+   if ( samples.empty() )
+      return 0.0;
+
+   const size_t k = size_t( 0.35 * double( samples.size() - 1 ) );
+   std::nth_element( samples.begin(), samples.begin() + ptrdiff_t( k ), samples.end() );
+   return samples[k];
+}
+
+static double FKBackgroundLevel( const pcl::ImageVariant& image )
+{
+   if ( image.IsFloatSample() )
+      switch ( image.BitsPerSample() )
+      {
+      case 32: return FKBackgroundLevelT( static_cast<const pcl::Image&>( *image ) );
+      case 64: return FKBackgroundLevelT( static_cast<const pcl::DImage&>( *image ) );
+      }
+   else
+      switch ( image.BitsPerSample() )
+      {
+      case 8:  return FKBackgroundLevelT( static_cast<const pcl::UInt8Image&>( *image ) );
+      case 16: return FKBackgroundLevelT( static_cast<const pcl::UInt16Image&>( *image ) );
+      case 32: return FKBackgroundLevelT( static_cast<const pcl::UInt32Image&>( *image ) );
+      }
+   return 0.0;
+}
 
 // Local half-float conversions for memory-lean accumulators.
 static uint16_t FK_ToHalf( float f );
@@ -855,10 +894,6 @@ FKAutoPSFParameter* TheFKAutoPSFParameter = nullptr;
 FKPSFDiameterParameter* TheFKPSFDiameterParameter = nullptr;
 FKCorrectOnlyParameter* TheFKCorrectOnlyParameter = nullptr;
 FKNormSchemeParameter* TheFKNormSchemeParameter = nullptr;
-FKNormWpParameter* TheFKNormWpParameter = nullptr;
-FKNormMtParameter* TheFKNormMtParameter = nullptr;
-FKNormAtParameter* TheFKNormAtParameter = nullptr;
-FKNormTbParameter* TheFKNormTbParameter = nullptr;
 FKReflectPadParameter* TheFKReflectPadParameter = nullptr;
 FKTileOverlapParameter*  TheFKTileOverlapParameter  = nullptr;
 FKDeviceParameter*       TheFKDeviceParameter       = nullptr;
@@ -881,10 +916,6 @@ FKAstroInferenceProcess::FKAstroInferenceProcess()
    new FKPSFDiameterParameter( this );
    new FKCorrectOnlyParameter( this );
    new FKNormSchemeParameter( this );
-   new FKNormWpParameter( this );
-   new FKNormMtParameter( this );
-   new FKNormAtParameter( this );
-   new FKNormTbParameter( this );
    new FKReflectPadParameter( this );
    new FKTileOverlapParameter( this );
    new FKDeviceParameter( this );
@@ -955,12 +986,7 @@ void FKAstroInferenceInstance::Assign( const pcl::ProcessImplementation& x )
    p_tileOverlap  = p.p_tileOverlap;
    p_correctOnly  = p.p_correctOnly;
    p_normScheme   = p.p_normScheme;
-   p_normWp       = p.p_normWp;
-   p_normMt       = p.p_normMt;
-   p_normAt       = p.p_normAt;
-   p_normTb       = p.p_normTb;
    p_reflectPad   = p.p_reflectPad;
-   p_tileOverlap  = p.p_tileOverlap;
    p_device       = p.p_device;
    p_verbose      = p.p_verbose;
 }
@@ -1032,11 +1058,43 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
    C.inS = inS;
    C.outS = outS;
    C.verbose = p_verbose;
+   C.reflectPad = p_reflectPad;
 
-   // ---- parameters tensor payload (model contract: [1,5]) ----
+   // ---- normalization scheme (PIPELINE.md) ----
+   //   None : pixels pass through, 5 user parameter slots only.
+   //   FKv1 : per-tile log/MTF/affine normalization + 6th parameters slot
+   //          (brightness statistic, computed from the background level).
+   const bool fkv1 = ( int( p_normScheme ) == 1 );
+   double bg = 0.0, slot5 = 0.0;
+   if ( fkv1 )
+   {
+      if ( !engine.HasParamsInput() || engine.ParamsSize() < 6 )
+         throw pcl::Error( pcl::IsoString().Format(
+            "fk-astro: FKv1 normalization requires a model with a 6-element "
+            "parameters input; this model declares %d element(s). Select "
+            "'None' for 5-parameter models.",
+            engine.HasParamsInput() ? int( engine.ParamsSize() ) : 0 ) );
+
+      bg = FKBackgroundLevel( image );
+      if ( bg <= 0.0 )
+         throw pcl::Error( "fk-astro: FKv1: the image has no positive pixels; "
+                           "cannot derive the background statistic." );
+      bg = std::min( std::max( bg, 1.0e-12 ), 1.0 );
+      slot5 = -std::log10( bg );
+
+      C.normalizer.scheme = FKNormalizer::FKv1;
+      C.normalizer.wp = 0.505 * bg;
+
+      if ( p_verbose )
+         pcl::Console().WriteLn( pcl::IsoString().Format(
+            "fk-astro: FKv1: bg(P35)=%.6g  slot5=-log10(bg)=%.4f  wp=0.505*bg=%.6g",
+            bg, slot5, C.normalizer.wp ).c_str() );
+   }
+
+   // ---- parameters tensor payload (model contract: [1,5] or [1,6]) ----
    //   [0] sharpenStars        [1] adjustStarHalos in [0,1]
    //   [2] psfDiameter/2       [3] autoPSF flag (1/0)
-   //   [4] sharpenNonstellar
+   //   [4] sharpenNonstellar   [5] brightness = -log10(bg) (FKv1 only)
    if ( engine.HasParamsInput() )
    {
       C.params.assign( engine.ParamsSize(), 0.0f );
@@ -1067,6 +1125,9 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
          if ( C.params.size() > 4 )
             C.params[4] = float( p_sharpenNonstellar );
       }
+      // Slot 5: brightness statistic, computed (never a user parameter).
+      if ( fkv1 && C.params.size() > 5 )
+         C.params[5] = float( slot5 );
    }
 
    // ---- verbose: report the exact parameters tensor payload ----
@@ -1077,16 +1138,18 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
       {
          pmsg << "fk-astro: params["
               << pcl::IsoString().Format( "%d", int( C.params.size() ) ) << "]:";
-         const char* names[5] = { " sharpenStars", " adjustStarHalos",
+         const char* names[6] = { " sharpenStars", " adjustStarHalos",
                                   " psfDiameter/2", " autoPSF",
-                                  " sharpenNonstellar" };
+                                  " sharpenNonstellar", " brightness" };
          for ( size_t i = 0; i < C.params.size(); ++i )
          {
-            pmsg << ( i < 5 ? names[i] : " unused" )
+            pmsg << ( i < 6 ? names[i] : " unused" )
                  << pcl::IsoString().Format( "=%.4f", double( C.params[i] ) );
          }
          if ( p_correctOnly )
             pmsg << "  (correct only: adjustments neutralized)";
+         if ( !fkv1 && C.params.size() > 5 )
+            pmsg << "  (slot 5 left at 0; select FKv1 to compute it)";
       }
       else
          pmsg = "fk-astro: params: model has no parameters input";
@@ -1245,10 +1308,6 @@ void* FKAstroInferenceInstance::LockParameter( const pcl::MetaParameter* p, pcl:
    if ( p == TheFKPSFDiameterParameter ) return &p_psfDiameter;
    if ( p == TheFKCorrectOnlyParameter ) return &p_correctOnly;
    if ( p == TheFKNormSchemeParameter ) return &p_normScheme;
-   if ( p == TheFKNormWpParameter ) return &p_normWp;
-   if ( p == TheFKNormMtParameter ) return &p_normMt;
-   if ( p == TheFKNormAtParameter ) return &p_normAt;
-   if ( p == TheFKNormTbParameter ) return &p_normTb;
    if ( p == TheFKReflectPadParameter ) return &p_reflectPad;
    if ( p == TheFKTileOverlapParameter )  return &p_tileOverlap;
    if ( p == TheFKDeviceParameter )       return &p_device;

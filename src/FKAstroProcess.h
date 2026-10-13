@@ -36,16 +36,8 @@ extern FKPSFDiameterParameter* TheFKPSFDiameterParameter;
 class FKCorrectOnlyParameter;
 extern FKCorrectOnlyParameter* TheFKCorrectOnlyParameter;
 class FKNormSchemeParameter;
-class FKNormWpParameter;
-class FKNormMtParameter;
-class FKNormAtParameter;
-class FKNormTbParameter;
 class FKReflectPadParameter;
 extern FKNormSchemeParameter* TheFKNormSchemeParameter;
-extern FKNormWpParameter* TheFKNormWpParameter;
-extern FKNormMtParameter* TheFKNormMtParameter;
-extern FKNormAtParameter* TheFKNormAtParameter;
-extern FKNormTbParameter* TheFKNormTbParameter;
 extern FKReflectPadParameter* TheFKReflectPadParameter;
 extern FKTileOverlapParameter*  TheFKTileOverlapParameter;
 extern FKDeviceParameter*       TheFKDeviceParameter;
@@ -150,6 +142,10 @@ public:
    }
 };
 
+// Normalization scheme: None = pass pixels through, 5-parameter vector;
+// FKv1 = PIPELINE.md 6-parameter contract (per-tile log/MTF/affine
+// normalization around the background working point, slot 5 = -log10(bg)
+// computed automatically).
 class FKNormSchemeParameter : public pcl::MetaEnumeration
 {
 public:
@@ -163,73 +159,15 @@ public:
    }
    pcl::size_type NumberOfElements() const override
    {
-      return 4;
+      return 2;
    }
    pcl::IsoString ElementId( pcl::size_type idx ) const override
    {
-      switch ( idx )
-      {
-      case 0:  return "None";
-      case 1:  return "Arcsinh";
-      case 2:  return "Mtf";
-      default: return "MtfArcsinh";
-      }
+      return (idx == 0) ? "None" : "FKv1";
    }
    int ElementValue( pcl::size_type idx ) const override
    {
       return int( idx );
-   }
-};
-
-class FKNormWpParameter : public pcl::MetaFloat
-{
-public:
-   FKNormWpParameter( pcl::MetaProcess* P ) : pcl::MetaFloat( P )
-   {
-      TheFKNormWpParameter = this;
-   }
-   pcl::IsoString Id() const override
-   {
-      return "normWp";
-   }
-};
-
-class FKNormMtParameter : public pcl::MetaFloat
-{
-public:
-   FKNormMtParameter( pcl::MetaProcess* P ) : pcl::MetaFloat( P )
-   {
-      TheFKNormMtParameter = this;
-   }
-   pcl::IsoString Id() const override
-   {
-      return "normMt";
-   }
-};
-
-class FKNormAtParameter : public pcl::MetaFloat
-{
-public:
-   FKNormAtParameter( pcl::MetaProcess* P ) : pcl::MetaFloat( P )
-   {
-      TheFKNormAtParameter = this;
-   }
-   pcl::IsoString Id() const override
-   {
-      return "normAt";
-   }
-};
-
-class FKNormTbParameter : public pcl::MetaFloat
-{
-public:
-   FKNormTbParameter( pcl::MetaProcess* P ) : pcl::MetaFloat( P )
-   {
-      TheFKNormTbParameter = this;
-   }
-   pcl::IsoString Id() const override
-   {
-      return "normTb";
    }
 };
 
@@ -360,11 +298,7 @@ public:
    double      p_psfDiameter  = 0.0;         // [0, 8], used when !p_autoPSF
    double      p_tileOverlap  = 0.2;         // fraction of tile size, [0, 0.5]
    bool        p_correctOnly  = true;
-   pcl::pcl_enum p_normScheme = 0;    // 0=none 1=arcsinh 2=mtf 3=mtf+arcsinh
-   double      p_normWp       = 0.01;
-   double      p_normMt       = 0.25;
-   double      p_normAt       = 0.50;
-   double      p_normTb       = 0.00;
+   pcl::pcl_enum p_normScheme = 0;    // 0=None (5 params) 1=FKv1 (6 params, PIPELINE.md)
    bool        p_reflectPad   = true;
    pcl::pcl_enum p_device       = 0;  // 0=Auto 1=GPU 2=CPU
    bool        p_verbose      = true;

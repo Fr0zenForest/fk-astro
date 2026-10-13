@@ -59,83 +59,6 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->ModelSection.SetSizer( GUI->ModelSizer );
 
       // ---------------------------------------------------------------
-      // Normalization
-      // ---------------------------------------------------------------
-      GUI->NormBar.SetTitle( "Normalization" );
-      GUI->NormBar.OnToggleSection(
-         (pcl::SectionBar::section_event_handler)&FKAstroInterface::e_Section, *this );
-      GUI->NormBar.SetSection( GUI->NormSection );
-
-      GUI->NormSchemeLabel.SetText( "Scheme:" );
-      GUI->NormSchemeCombo.AddItem( "None" );
-      GUI->NormSchemeCombo.AddItem( "arcsinh(wp)" );
-      GUI->NormSchemeCombo.AddItem( "mtf(mt)" );
-      GUI->NormSchemeCombo.AddItem( "mtf+arcsinh(mt,at,tb)" );
-      GUI->NormSchemeCombo.SetCurrentItem( m_normScheme );
-      GUI->NormSchemeCombo.SetToolTip(
-         "<p>Per-tile normalization applied before the model, with inverse "
-         "after inference. Pick the scheme your model was trained with; "
-         "'None' passes pixels through unchanged.</p>" );
-      GUI->NormSchemeCombo.OnItemSelected(
-         (pcl::ComboBox::item_event_handler)&FKAstroInterface::e_NormScheme, *this );
-
-      GUI->NormSchemeSizer.SetSpacing( 4 );
-      GUI->NormSchemeSizer.Add( GUI->NormSchemeLabel );
-      GUI->NormSchemeSizer.Add( GUI->NormSchemeCombo );
-
-      GUI->NormWp.label.SetText( "wp (arcsinh):" );
-      GUI->NormWp.SetRange( 1.0e-4, 10.0 );
-      GUI->NormWp.SetPrecision( 4 );
-      GUI->NormWp.SetValue( m_normWp );
-      GUI->NormWp.SetToolTip( "<p>Arcsinh working point: smaller values "
-         "stretch faint signal more strongly.</p>" );
-      GUI->NormWp.OnValueUpdated(
-         (pcl::NumericEdit::value_event_handler)&FKAstroInterface::e_NormWp, *this );
-
-      GUI->NormMt.label.SetText( "mt (mtf):" );
-      GUI->NormMt.SetRange( 0.001, 0.999 );
-      GUI->NormMt.SetPrecision( 4 );
-      GUI->NormMt.SetValue( m_normMt );
-      GUI->NormMt.SetToolTip( "<p>MTF midtone: input value mapped to 0.5.</p>" );
-      GUI->NormMt.OnValueUpdated(
-         (pcl::NumericEdit::value_event_handler)&FKAstroInterface::e_NormMt, *this );
-
-      GUI->NormAt.label.SetText( "at (transition):" );
-      GUI->NormAt.SetRange( 0.001, 0.999 );
-      GUI->NormAt.SetPrecision( 4 );
-      GUI->NormAt.SetValue( m_normAt );
-      GUI->NormAt.SetToolTip( "<p>mtf+arcsinh transition point, must be in "
-         "(mt, 1).</p>" );
-      GUI->NormAt.OnValueUpdated(
-         (pcl::NumericEdit::value_event_handler)&FKAstroInterface::e_NormAt, *this );
-
-      GUI->NormTb.label.SetText( "tb (toe):" );
-      GUI->NormTb.SetRange( 0.0, 0.999 );
-      GUI->NormTb.SetPrecision( 4 );
-      GUI->NormTb.SetValue( m_normTb );
-      GUI->NormTb.SetToolTip( "<p>mtf+arcsinh toe / black point.</p>" );
-      GUI->NormTb.OnValueUpdated(
-         (pcl::NumericEdit::value_event_handler)&FKAstroInterface::e_NormTb, *this );
-
-      GUI->ReflectPadCheck.SetText( "Reflect border padding" );
-      GUI->ReflectPadCheck.SetChecked( m_reflectPad );
-      GUI->ReflectPadCheck.SetToolTip(
-         "<p>Mirror the image at borders when a tile window extends past "
-         "the edge. Unchecked: replicate edge pixels.</p>" );
-      GUI->ReflectPadCheck.OnCheck(
-         (pcl::Button::check_event_handler)&FKAstroInterface::e_ReflectPad, *this );
-
-      GUI->NormSizer.SetMargin( 4 );
-      GUI->NormSizer.SetSpacing( 4 );
-      GUI->NormSizer.Add( GUI->NormSchemeSizer );
-      GUI->NormSizer.Add( GUI->NormWp );
-      GUI->NormSizer.Add( GUI->NormMt );
-      GUI->NormSizer.Add( GUI->NormAt );
-      GUI->NormSizer.Add( GUI->NormTb );
-      GUI->NormSizer.Add( GUI->ReflectPadCheck );
-      GUI->NormSection.SetSizer( GUI->NormSizer );
-
-      // ---------------------------------------------------------------
       // Stellar Adjustments
       // ---------------------------------------------------------------
       GUI->StellarBar.SetTitle( "Stellar Adjustments" );
@@ -224,12 +147,6 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
 
       GUI->CorrectOnlyCheck.SetText( "Correct only" );
       GUI->CorrectOnlyCheck.SetChecked( m_correctOnly );
-      GUI->NormSchemeCombo.SetCurrentItem( m_normScheme );
-      GUI->NormWp.SetValue( m_normWp );
-      GUI->NormMt.SetValue( m_normMt );
-      GUI->NormAt.SetValue( m_normAt );
-      GUI->NormTb.SetValue( m_normTb );
-      GUI->ReflectPadCheck.SetChecked( m_reflectPad );
       GUI->CorrectOnlyCheck.SetToolTip(
          "<p>When enabled, the model is asked to only correct the PSF "
          "(no additional sharpening); when disabled, the sharpening "
@@ -237,9 +154,33 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->CorrectOnlyCheck.OnCheck(
          (pcl::Button::check_event_handler)&FKAstroInterface::e_CorrectOnly, *this );
 
+      GUI->NormLabel.SetText( "Normalization:" );
+      GUI->NormCombo.AddItem( "None" );
+      GUI->NormCombo.AddItem( "FKv1" );
+      GUI->NormCombo.SetCurrentItem( m_normScheme );
+      GUI->NormCombo.SetToolTip(
+         "<p><b>None</b> — pixels are passed to the model unchanged and the "
+         "parameters vector carries the five user slots (sharpen stars, "
+         "star halos, PSF diameter, automatic PSF, sharpen nonstellar).</p>"
+         "<p><b>FKv1</b> — the 6-parameter contract from PIPELINE.md: the "
+         "background statistic bg is measured once per image (P35 "
+         "quantile), the sixth parameters slot is set to -log10(bg), and "
+         "each tile is normalized with the FKv1 curve (log stretch around "
+         "the working point 0.505*bg, MTF with m=0.100, affine "
+         "a=1.4685, b=-0.7095) before inference, with its inverse applied "
+         "to the model output. Requires a model with a 6-element "
+         "parameters input.</p>" );
+      GUI->NormCombo.OnItemSelected(
+         (pcl::ComboBox::item_event_handler)&FKAstroInterface::e_NormScheme, *this );
+
+      GUI->NormSizer.SetSpacing( 4 );
+      GUI->NormSizer.Add( GUI->NormLabel );
+      GUI->NormSizer.Add( GUI->NormCombo );
+
       GUI->OptionsSizer.SetMargin( 4 );
       GUI->OptionsSizer.SetSpacing( 4 );
       GUI->OptionsSizer.Add( GUI->CorrectOnlyCheck );
+      GUI->OptionsSizer.Add( GUI->NormSizer );
       GUI->OptionsSection.SetSizer( GUI->OptionsSizer );
 
       // ---------------------------------------------------------------
@@ -261,6 +202,14 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->TileOverlap.OnValueUpdated(
          (pcl::NumericEdit::value_event_handler)&FKAstroInterface::e_Overlap, *this );
 
+      GUI->ReflectPadCheck.SetText( "Reflect border padding" );
+      GUI->ReflectPadCheck.SetChecked( m_reflectPad );
+      GUI->ReflectPadCheck.SetToolTip(
+         "<p>Mirror the image at borders when a tile window extends past "
+         "the edge. Unchecked: replicate edge pixels.</p>" );
+      GUI->ReflectPadCheck.OnCheck(
+         (pcl::Button::check_event_handler)&FKAstroInterface::e_ReflectPad, *this );
+
       GUI->DeviceLabel.SetText( "Compute device:" );
       GUI->DeviceCombo.AddItem( "Automatic (GPU)" );
       GUI->DeviceCombo.AddItem( "GPU" );
@@ -281,6 +230,7 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->AdditionalSizer.SetMargin( 4 );
       GUI->AdditionalSizer.SetSpacing( 4 );
       GUI->AdditionalSizer.Add( GUI->TileOverlap );
+      GUI->AdditionalSizer.Add( GUI->ReflectPadCheck );
       GUI->AdditionalSizer.Add( GUI->DeviceSizer );
       GUI->AdditionalSizer.Add( GUI->VerboseCheck );
       GUI->AdditionalSection.SetSizer( GUI->AdditionalSizer );
@@ -292,8 +242,6 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->VSizer.SetSpacing( 4 );
       GUI->VSizer.Add( GUI->ModelBar );
       GUI->VSizer.Add( GUI->ModelSection );
-      GUI->VSizer.Add( GUI->NormBar );
-      GUI->VSizer.Add( GUI->NormSection );
       GUI->VSizer.Add( GUI->StellarBar );
       GUI->VSizer.Add( GUI->StellarSection );
       GUI->VSizer.Add( GUI->NonstellarBar );
@@ -340,10 +288,6 @@ pcl::ProcessImplementation* FKAstroInterface::NewProcess() const
    instance->p_psfDiameter       = m_psfDiameter;
    instance->p_correctOnly       = m_correctOnly;
    instance->p_normScheme        = m_normScheme;
-   instance->p_normWp            = m_normWp;
-   instance->p_normMt            = m_normMt;
-   instance->p_normAt            = m_normAt;
-   instance->p_normTb            = m_normTb;
    instance->p_reflectPad        = m_reflectPad;
    instance->p_tileOverlap       = m_tileOverlap;
    instance->p_device            = m_device;
@@ -366,10 +310,6 @@ bool FKAstroInterface::ImportProcess( const pcl::ProcessImplementation& P )
    m_psfDiameter       = instance->p_psfDiameter;
    m_correctOnly       = instance->p_correctOnly;
    m_normScheme        = int( instance->p_normScheme );
-   m_normWp            = instance->p_normWp;
-   m_normMt            = instance->p_normMt;
-   m_normAt            = instance->p_normAt;
-   m_normTb            = instance->p_normTb;
    m_reflectPad        = instance->p_reflectPad;
    m_tileOverlap       = instance->p_tileOverlap;
    m_device            = int( instance->p_device );
@@ -385,11 +325,7 @@ bool FKAstroInterface::ImportProcess( const pcl::ProcessImplementation& P )
       GUI->PSFDiameter.SetValue( m_psfDiameter );
       GUI->PSFDiameter.Enable( !m_autoPSF );
       GUI->CorrectOnlyCheck.SetChecked( m_correctOnly );
-      GUI->NormSchemeCombo.SetCurrentItem( m_normScheme );
-      GUI->NormWp.SetValue( m_normWp );
-      GUI->NormMt.SetValue( m_normMt );
-      GUI->NormAt.SetValue( m_normAt );
-      GUI->NormTb.SetValue( m_normTb );
+      GUI->NormCombo.SetCurrentItem( m_normScheme );
       GUI->ReflectPadCheck.SetChecked( m_reflectPad );
       GUI->TileOverlap.SetValue( m_tileOverlap );
       GUI->DeviceCombo.SetCurrentItem( m_device );
@@ -499,32 +435,12 @@ void FKAstroInterface::UpdateEnabledStates()
 }
 
 // ---------------------------------------------------------------------------
-// Normalization event handlers
+// Normalization / padding event handlers
 // ---------------------------------------------------------------------------
 
 void FKAstroInterface::e_NormScheme( pcl::ComboBox&, int itemIndex )
 {
    m_normScheme = itemIndex;
-}
-
-void FKAstroInterface::e_NormWp( pcl::NumericEdit&, double value )
-{
-   m_normWp = value;
-}
-
-void FKAstroInterface::e_NormMt( pcl::NumericEdit&, double value )
-{
-   m_normMt = value;
-}
-
-void FKAstroInterface::e_NormAt( pcl::NumericEdit&, double value )
-{
-   m_normAt = value;
-}
-
-void FKAstroInterface::e_NormTb( pcl::NumericEdit&, double value )
-{
-   m_normTb = value;
 }
 
 void FKAstroInterface::e_ReflectPad( pcl::Button&, pcl::Button::check_state state )

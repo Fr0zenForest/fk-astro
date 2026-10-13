@@ -13,8 +13,11 @@ fk-astro/
 │   ├── CoreMLEngine.h    CoreML 引擎接口(纯 C++)
 │   ├── CoreMLEngine.mm   引擎实现:compileModelAtURL / MLModel / MLMultiArray
 │   ├── FKAstroProcess.h  进程与参数元类定义
-│   ├── FKAstroProcess.cpp  分块推理管线(FillTile/Predict/StoreTile)
+│   ├── FKAstroProcess.cpp  分块推理管线(FillTile/Predict/StoreTile/FKv1 归一化)
+│   ├── FKAstroInterface.h   自定义界面定义(五区分组)
+│   ├── FKAstroInterface.cpp 界面实现(Options 区含归一化下拉)
 │   └── FKAstroModule.cpp 模块入口(MetaModule + InstallPixInsightModule)
+├── PIPELINE.md           推理流程通用规范(归一化/6 参数契约)
 ├── build/                编译中间产物(按架构分子目录)
 └── dist/FKAstro-pxm.dylib  ← 最终模块
 ```
@@ -64,17 +67,32 @@ PixInsight **强制要求模块签名**(`.xsgn`,Ed25519),未签名模块无法�
 
 ## 使用
 
-进程名 **FKAstroInference**(分类 Preprocessing / fk-astro)。
-参数(默认界面自动生成):
+进程名 **FKAstroInference**(分类 Preprocessing / FKAstro),自定义界面分五区:
+Model / Stellar Adjustments / Nonstellar Adjustments / Options /
+Additional Options。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | modelPath | — | 模型文件路径(.mlpackage 或 .mlmodel) |
-| inputScale / inputOffset | 1.0 / 0.0 | 输入变换 `t = v·scale + offset` |
-| outputScale / outputOffset | 1.0 / 0.0 | 输出变换 `v' = t'·scale + offset`(结果截断到 [0,1]) |
-| tileOverlap | 0.2 | 相邻块重叠像素(消除块间接缝;模型输入尺寸固定,块大小由模型决定) |
-| device | Auto | Auto(ANE→GPU→CPU)/ GPU / CPU |
+| sharpenStars | 0.5 | 恒星区锐化强度 [0, 0.7](参数槽 0) |
+| adjustStarHalos | 0.0 | 恒星光晕调整 [-0.5, 0.5](参数槽 1) |
+| psfDiameter / autoPSF | 0.0 / true | 目标 PSF 直径 [0, 8] px;自动时模型自估(参数槽 2/3) |
+| sharpenNonstellar | 0.5 | 非恒星区锐化强度 [0, 1](参数槽 4) |
+| correctOnly | true | 中性校正模式:槽 0–4 清零(自动 PSF 仍生效) |
+| normScheme | None | 归一化方案,见下 |
+| reflectPad | true | 分块窗口越界时镜像填充(否则复制边缘像素) |
+| tileOverlap | 0.2 | 相邻块重叠比例 [0, 0.5](消除块间接缝) |
+| device | Auto | Auto / GPU / CPU |
 | verbose | true | 过程控制台输出进度 |
+
+### 归一化(Options 区)
+
+- **None** — 像素直通模型,参数向量只含 5 个用户槽位。
+- **FKv1** — PIPELINE.md 的 6 参数契约:每图测一次背景统计
+  `bg = P35 分位数`,第 6 入参 `slot5 = -log10(bg)` 自动计算(非用户参数),
+  逐块做 `log → MTF(m=0.100) → affine(a=1.4685, b=-0.7095)` 正向归一化、
+  推理后逆变换贴回,工作点 `wp = 0.505 × bg`。要求模型声明
+  `[1, 6]` parameters 输入(5 参数模型选 FKv1 会直接报错)。
 
 ## 模型要求(当前骨架的限制)
 
