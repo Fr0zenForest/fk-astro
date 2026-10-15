@@ -154,6 +154,15 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->CorrectOnlyCheck.OnCheck(
          (pcl::Button::check_event_handler)&FKAstroInterface::e_CorrectOnly, *this );
 
+      GUI->LunarPlanetaryCheck.SetText( "Lunar/Planetary" );
+      GUI->LunarPlanetaryCheck.SetChecked( m_lunarPlanetary );
+      GUI->LunarPlanetaryCheck.SetToolTip(
+         "<p>Lunar/Planetary mode (catalog id <b>lp</b>). A mode flag only: "
+         "it is stored with the process and is not written into the "
+         "parameters tensor. Default off. Stellar controls stay available.</p>" );
+      GUI->LunarPlanetaryCheck.OnCheck(
+         (pcl::Button::check_event_handler)&FKAstroInterface::e_LunarPlanetary, *this );
+
       GUI->NormLabel.SetText( "Normalization:" );
       GUI->NormCombo.AddItem( "None" );
       GUI->NormCombo.AddItem( "FKv1" );
@@ -163,22 +172,20 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
          "<p><b>None</b> — pixels are passed to the model unchanged and the "
          "parameters vector carries the five user slots (sharpen stars, "
          "star halos, PSF diameter, automatic PSF, sharpen nonstellar).</p>"
-         "<p><b>FKv1</b> — the 6-parameter contract from PIPELINE.md: the "
-         "background statistic bg is measured once per image (P35 "
-         "quantile), the sixth parameters slot is set to -log10(bg), and "
-         "each tile is normalized with the FKv1 curve (log stretch around "
-         "the working point 0.505*bg, MTF with m=0.100, affine "
+         "<p><b>FKv1</b> — the background statistic bg is measured once per "
+         "image (P35 quantile). Each tile uses the FKv1 curve (log stretch "
+         "around the working point 0.505*bg, MTF with m=0.100, affine "
          "a=1.4685, b=-0.7095) before inference, with its inverse applied "
-         "to the model output. Requires a model with a 6-element "
-         "parameters input.</p>"
+         "to the model output.</p>"
          "<p><b>FKv2</b> (recommended for BlurXTerminator ML5) — same "
-         "per-image background statistic and sixth slot as FKv1, but the "
-         "forward/inverse transforms use calibrated monotone curves "
-         "captured at runtime from the ML5 model inputs (FKCurves.h): "
-         "the curve whose bg is closest in log space is selected and "
-         "evaluated with monotone PCHIP interpolation, with the inverse "
-         "saturating at the curve endpoints. Requires a 6-element "
-         "parameters input (ML5 only).</p>" );
+         "per-image P35 statistic, but the forward/inverse transforms use "
+         "calibrated monotone curves captured at runtime from the ML5 model "
+         "inputs (FKCurves.h): the curve whose bg is closest in log space "
+         "is selected and evaluated with monotone PCHIP interpolation, with "
+         "the inverse saturating at the curve endpoints. Out-of-range "
+         "window pixels are zero-filled.</p>"
+         "<p>Both schemes write the sixth parameters column as log10gain. "
+         "Requires a 6-element parameters input (FKv2 is for ML5).</p>" );
       GUI->NormCombo.OnItemSelected(
          (pcl::ComboBox::item_event_handler)&FKAstroInterface::e_NormScheme, *this );
 
@@ -189,6 +196,7 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->OptionsSizer.SetMargin( 4 );
       GUI->OptionsSizer.SetSpacing( 4 );
       GUI->OptionsSizer.Add( GUI->CorrectOnlyCheck );
+      GUI->OptionsSizer.Add( GUI->LunarPlanetaryCheck );
       GUI->OptionsSizer.Add( GUI->NormSizer );
       GUI->OptionsSection.SetSizer( GUI->OptionsSizer );
 
@@ -205,9 +213,9 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->TileOverlap.SetPrecision( 2 );
       GUI->TileOverlap.SetValue( m_tileOverlap );
       GUI->TileOverlap.SetToolTip(
-         "<p>Overlap between adjacent tiles, as a fraction of the tile "
-         "size. Range 0.0 – 0.5, default 0.2. Larger values reduce seam "
-         "artifacts at the cost of more compute.</p>" );
+         "<p>Overlap fraction, range 0.0 – 0.5, default 0.2. The center-crop "
+         "grid stays the equal-pitch placement. The blend across the "
+         "middle-tile gap is a raised cosine.</p>" );
       GUI->TileOverlap.OnValueUpdated(
          (pcl::NumericEdit::value_event_handler)&FKAstroInterface::e_Overlap, *this );
 
@@ -296,6 +304,7 @@ pcl::ProcessImplementation* FKAstroInterface::NewProcess() const
    instance->p_autoPSF           = m_autoPSF;
    instance->p_psfDiameter       = m_psfDiameter;
    instance->p_correctOnly       = m_correctOnly;
+   instance->p_lunarPlanetary    = m_lunarPlanetary;
    instance->p_normScheme        = m_normScheme;
    instance->p_reflectPad        = m_reflectPad;
    instance->p_tileOverlap       = m_tileOverlap;
@@ -318,6 +327,7 @@ bool FKAstroInterface::ImportProcess( const pcl::ProcessImplementation& P )
    m_autoPSF           = instance->p_autoPSF;
    m_psfDiameter       = instance->p_psfDiameter;
    m_correctOnly       = instance->p_correctOnly;
+   m_lunarPlanetary    = instance->p_lunarPlanetary;
    m_normScheme        = int( instance->p_normScheme );
    m_reflectPad        = instance->p_reflectPad;
    m_tileOverlap       = instance->p_tileOverlap;
@@ -334,6 +344,7 @@ bool FKAstroInterface::ImportProcess( const pcl::ProcessImplementation& P )
       GUI->PSFDiameter.SetValue( m_psfDiameter );
       GUI->PSFDiameter.Enable( !m_autoPSF );
       GUI->CorrectOnlyCheck.SetChecked( m_correctOnly );
+      GUI->LunarPlanetaryCheck.SetChecked( m_lunarPlanetary );
       GUI->NormCombo.SetCurrentItem( m_normScheme );
       GUI->ReflectPadCheck.SetChecked( m_reflectPad );
       GUI->TileOverlap.SetValue( m_tileOverlap );
@@ -401,6 +412,11 @@ void FKAstroInterface::e_CorrectOnly( pcl::Button&, pcl::Button::check_state sta
 {
    m_correctOnly = (state == pcl::CheckState::Checked);
    UpdateEnabledStates();
+}
+
+void FKAstroInterface::e_LunarPlanetary( pcl::Button&, pcl::Button::check_state state )
+{
+   m_lunarPlanetary = (state == pcl::CheckState::Checked);
 }
 
 

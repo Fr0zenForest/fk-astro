@@ -85,9 +85,10 @@ Additional Options。
 | psfDiameter / autoPSF | 0.0 / true | 目标 PSF 直径 [0, 8] px;自动时模型自估(参数槽 2/3) |
 | sharpenNonstellar | 0.5 | 非恒星区锐化强度 [0, 1](参数槽 4) |
 | correctOnly | true | 中性校正模式:槽 0–4 清零(自动 PSF 仍生效) |
+| lunarPlanetary | false | Lunar/Planetary 模式开关。只随进程保存,不写入 parameters 的 6 列 |
 | normScheme | None | 归一化方案,见下 |
-| reflectPad | true | 分块窗口越界时镜像填充(否则复制边缘像素) |
-| tileOverlap | 0.2 | 相邻块重叠比例 [0, 0.5](消除块间接缝) |
+| reflectPad | true | 分块窗口越界时镜像填充(否则复制边缘像素)。FKv2 越界填 0 |
+| tileOverlap | 0.2 | 相邻块重叠比例 [0, 0.5]。中心裁切的块原点仍是等间距网格,接缝用升余弦,窗长取中间块的实际间距 |
 | device | Auto | Auto / GPU / CPU |
 | verbose | true | 过程控制台输出进度 |
 
@@ -97,13 +98,13 @@ Additional Options。
   BXT **ML4(5 参数模型)用这个**:官方 ML4 的归一化接近恒等,
   直通即可到全图 mean 差 ~8e-5 的精度(见下表)。
 - **FKv1** — 6 参数规范公式:每图测一次背景统计 `bg = P35 分位数`,
-  第 6 入参 `slot5 = -log10(bg)` 自动计算(非用户参数),
+  第 6 入参 `slot5 = log10gain` 自动计算(非用户参数,不是 `-log10(bg)`),
   逐块做 `log → MTF(m=0.100) → affine(a=1.4685, b=-0.7095)` 正向归一化、
   推理后逆变换贴回,工作点 `wp = 0.505 × bg`。要求模型声明
   `[1, 6]` parameters 输入(5 参数模型选 FKv1 会直接报错)。
   暗区可用,亮区相对误差可达 30–130%,已被 FKv2 取代,仅留作对照。
-- **FKv2**(推荐,ML5 用) — 标定曲线归一化。同 FKv1 一样按图测 `bg`
-  并计算 `slot5`,但正/逆变换换成从 **BlurXTerminator ML5 运行时真实模型
+- **FKv2**(推荐,ML5 用) — 标定曲线归一化。同 FKv1 一样按图测 `bg`,
+  第 6 列同样是 `log10gain`。正/逆变换换成从 **BlurXTerminator ML5 运行时真实模型
   输入**采集的单调曲线(`src/FKCurves.h`):
   - 曲线按 `log(bg)` 最近邻从 5 组标定中选择
     (bg = 0.002 / **0.0102 深空典型** / 0.1025 / 0.19 / 0.35,
@@ -119,7 +120,8 @@ Additional Options。
 复刻 BXT 精确 tile 布局(逆向 0xf089c + 实测验证):
 输出块固定 512²,`n = ceil(D / (512·(1−overlap)))`,`sx = D/n`,
 内部块位置 `pos(k) = round(sx·k − (512−sx)/2)`(k = 1..n−2),
-首块 0、末块 D−512。重叠区按羽化权重线性融合。
+首块 0、末块 D−512。重叠区用升余弦,窗长是中间块的实际间距
+(块尺寸减去这一步),外缘权重约 0。
 实测 M31(6248×4176, overlap 0.2)的列序列
 0, 330, 720, 1111, …, 5406, 5736 与官方完全吻合。
 
@@ -148,6 +150,9 @@ ML4 结论:官方 ML4 归一化近恒等(5 参数模型,无背景槽),
 None 直通即达全图 mean 差 7.8e-5;若要 ML4 也到逐位级,
 需另外采集 ML4 标定曲线(当前曲线库只覆盖 ML5)。
 
+上表是在第 6 列仍为 `-log10(bg)`、重叠区为线性羽化时测得的。
+当前第 6 列是 `log10gain`,重叠区是升余弦。
+
 ## 模型要求(当前骨架的限制)
 
 - 输入输出都是 **固定形状 3-D float32 多数组**(CHW 或 HWC 自动识别)。
@@ -166,7 +171,7 @@ None 直通即达全图 mean 差 7.8e-5;若要 ML4 也到逐位级,
 - 链接:`-lPCL-pxi -llz4-pxi -lzstd-pxi -lzlib-pxi -lRFC6234-pxi -llcms-pxi`
   + `-framework AppKit -framework Foundation -framework CoreML`
 - 分块:输出块 512²,网格公式见上节;窗口原点钳位到 `[0, W−TW]`,
-  输出只写每块中心区域,重叠区羽化融合
+  输出只写每块中心区域,重叠区用升余弦融合
 - 归一化曲线插值(PCHIP)在 double 域做,喂模型前转 float32;
   逆变换后写回整型图像时必须过 `HighestSampleValue` 量化,
   不能把 [0,1] 值直接标量转换成整型(会全黑)
