@@ -1,7 +1,8 @@
 ######################################################################
 # fk-astro — build system
 #
-# Builds a universal (arm64 + x86_64) PixInsight module:
+# Builds a PixInsight module (universal arm64 + x86_64 when the installed
+# PCL supports arm64, x86_64 only otherwise):
 #
 #   FKAstro-pxm.dylib
 #
@@ -24,10 +25,17 @@ SDK      = $(shell xcrun --sdk macosx --show-sdk-path)
 CXX      = clang++
 CC       = clang
 AR       = ar
-ARCHS    = arm64 x64
+# Build arm64 only when the installed PCL supports it (Apple Silicon
+# PixInsight builds ship makefile-arm64; Intel-only builds do not).
+ARCHS   ?= $(if $(wildcard $(PCLSRC)/pcl/macosx/g++/makefile-arm64),arm64 x64,x64)
 # clang arch flag per build dir ("x64" is PCL naming; clang wants x86_64)
 ARCH_CLANG_arm64 = arm64
 ARCH_CLANG_x64 = x86_64
+# zlib-only per-arch extra flags: the fdopen identity macro came in during
+# Intel bring-up (PR #1) and has no observable effect on current SDKs, so it
+# is confined to x64 until the toolchain that needed it is confirmed.
+ARCH_ZLIB_CFLAGS_arm64 =
+ARCH_ZLIB_CFLAGS_x64 = -Dfdopen=fdopen
 DIST     = dist
 
 #
@@ -112,7 +120,7 @@ build/$(1)/3rdparty/lz4/%.o: $(T)/lz4/%.c
 
 build/$(1)/3rdparty/zlib/%.o: $(T)/zlib/%.c
 	@mkdir -p $$(@D)
-	$$(CC) $$(BASE_CFLAGS) -arch $$(ARCH_CLANG_$(1)) -DZ_HAVE_UNISTD_H -I"$(T)/zlib" -c -o $$@ $$<
+	$$(CC) $$(BASE_CFLAGS) -arch $$(ARCH_CLANG_$(1)) -DZ_HAVE_UNISTD_H $$(ARCH_ZLIB_CFLAGS_$(1)) -I"$(T)/zlib" -c -o $$@ $$<
 
 build/$(1)/3rdparty/RFC6234/%.o: $(T)/RFC6234/%.c
 	@mkdir -p $$(@D)
@@ -151,7 +159,7 @@ endef
 
 $(foreach A,$(ARCHS),$(eval $(call PCL_RULES,$(A))))
 
-pcl: pcl-arm64 pcl-x64
+pcl: $(foreach A,$(ARCHS),pcl-$(A))
 
 #
 # Module
