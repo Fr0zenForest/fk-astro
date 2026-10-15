@@ -159,11 +159,11 @@ public:
    }
    pcl::size_type NumberOfElements() const override
    {
-      return 2;
+      return 3;
    }
    pcl::IsoString ElementId( pcl::size_type idx ) const override
    {
-      return (idx == 0) ? "None" : "FKv1";
+      return (idx == 0) ? "None" : (idx == 1) ? "FKv1" : "FKv2";
    }
    int ElementValue( pcl::size_type idx ) const override
    {

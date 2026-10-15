@@ -24,6 +24,7 @@
 #include <pcl/Utility.h>
 
 #include "FKAstroProcess.h"
+#include "FKCurves.h"
 #include "CoreMLEngine.h"
 
 #include <vector>
@@ -64,10 +65,160 @@ float ToNormFloat( S v )
 // ---------------------------------------------------------------------------
 struct FKNormalizer
 {
-   enum Scheme { None = 0, FKv1 = 1 };
+   enum Scheme { None = 0, FKv1 = 1, FKv2 = 2 };
 
    Scheme scheme = None;
    double wp = 0.01;   // FKv1 working point, = 0.505 * background level
+   double bg = 0.01;   // image background statistic (curve selection for FKv2)
+   const fka::FKCurve* curve = nullptr;   // FKv2 selected curve
+
+   // FKv2: pick the calibration curve whose bg is closest in log space.
+   void SelectCurve()
+   {
+      if ( scheme != FKv2 )
+         return;
+      double lb = std::log( std::max( bg, 1.0e-12 ) );
+      double bestD = 0.0;
+      for ( int i = 0; i < fka::fk_curve_count; ++i )
+      {
+         double d = std::fabs( std::log( fka::fk_curves[i].bg ) - lb );
+         if ( curve == nullptr || d < bestD )
+         {
+            bestD = d;
+            curve = &fka::fk_curves[i];
+         }
+      }
+      if ( curve != nullptr )
+         BuildSlopes( curve->x, curve->y, curve->n );
+   }
+
+   // Monotone PCHIP (Fritsch-Carlson) interpolation, identical to
+   // scipy.interpolate.PchipInterpolator in the Python reference.
+   // Two slope sets: forward (over x nodes) and inverse (over y nodes).
+   double slope[512] = {};    // forward node derivatives
+   double slopeI[512] = {};   // inverse node derivatives (y -> x)
+   int    slopeN = 0, slopeIN = 0;
+
+   static void BuildSlopesImpl( const double* xs, const double* ys, int n, double* out )
+   {
+      if ( n <= 1 )
+         return;
+      double d[512];
+      const int nm1 = n - 1;
+      for ( int i = 0; i < nm1; ++i )
+      {
+         double h = xs[i+1] - xs[i];
+         d[i] = ( h != 0.0 ) ? ( ys[i+1] - ys[i] ) / h : 0.0;
+      }
+      out[0] = d[0];
+      for ( int i = 1; i < nm1; ++i )
+      {
+         double h0 = xs[i] - xs[i-1];
+         double h1 = xs[i+1] - xs[i];
+         if ( d[i-1] * d[i] <= 0.0 )
+            out[i] = 0.0;
+         else
+         {
+            double w1 = 2.0*h1 + h0;
+            double w2 = h1 + 2.0*h0;
+            out[i] = (w1 + w2) / ( w1 / d[i-1] + w2 / d[i] );
+         }
+      }
+      out[nm1] = d[nm1-1];
+   }
+
+   void BuildSlopes( const double* xs, const double* ys, int n )
+   {
+      slopeN = ( n > 0 ) ? n : 0;
+      BuildSlopesImpl( xs, ys, n, slope );
+      BuildSlopesImpl( ys, xs, n, slopeI );   // inverse: swap axes
+      slopeIN = slopeN;
+   }
+
+   static double EvalPchip( const double* xs, const double* ys,
+                            const double* m, int n, double x )
+   {
+      if ( n <= 1 )
+         return x;
+      if ( x <= xs[0] )
+         return ys[0] + m[0] * ( x - xs[0] );
+      if ( x >= xs[n-1] )
+         return ys[n-1] + m[n-1] * ( x - xs[n-1] );
+      int lo = 0, hi = n - 1;
+      while ( hi - lo > 1 )
+      {
+         int mid = (lo + hi) >> 1;
+         if ( xs[mid] <= x ) lo = mid; else hi = mid;
+      }
+      const double h = xs[hi] - xs[lo];
+      const double t = ( x - xs[lo] ) / h;
+      const double t2 = t*t, t3 = t2*t;
+      const double h00 =  2*t3 - 3*t2 + 1;
+      const double h10 =    t3 - 2*t2 + t;
+      const double h01 = -2*t3 + 3*t2;
+      const double h11 =    t3 -   t2;
+      return h00*ys[lo] + h10*h*m[lo] + h01*ys[hi] + h11*h*m[hi];
+   }
+
+   double Interp( const double* xs, const double* ys, int n, double x ) const
+   {
+      if ( n <= 1 )
+         return x;
+      if ( x <= xs[0] )
+         return ys[0] + slope[0] * ( x - xs[0] );
+      if ( x >= xs[n-1] )
+         return ys[n-1] + slope[n-1] * ( x - xs[n-1] );
+      return EvalPchip( xs, ys, slope, n, x );
+   }
+
+   static double InterpLinear( const double* xs, const double* ys, int n, double x )
+   {
+      if ( n == 0 )
+         return x;
+      if ( x <= xs[0] )
+      {
+         if ( n > 1 )
+            return ys[0] + (ys[1]-ys[0]) * (x-xs[0]) / (xs[1]-xs[0]);
+         return ys[0];
+      }
+      if ( x >= xs[n-1] )
+      {
+         if ( n > 1 )
+            return ys[n-1] + (ys[n-1]-ys[n-2]) * (x-xs[n-1]) / (xs[n-1]-xs[n-2]);
+         return ys[n-1];
+      }
+      int lo = 0, hi = n - 1;
+      while ( hi - lo > 1 )
+      {
+         int mid = (lo + hi) >> 1;
+         if ( xs[mid] <= x ) lo = mid; else hi = mid;
+      }
+      double t = (x - xs[lo]) / (xs[hi] - xs[lo]);
+      return ys[lo] + t * (ys[hi] - ys[lo]);
+   }
+
+   float Forward( float x ) const
+   {
+      if ( scheme == FKv2 && curve != nullptr )
+         return float( Interp( curve->x, curve->y, curve->n, x ) );
+      return ForwardFKv1( x );
+   }
+
+   float Inverse( float y ) const
+   {
+      if ( scheme == FKv2 && curve != nullptr && slopeIN == curve->n )
+      {
+         // Saturation semantics: model outputs beyond the calibration range
+         // clamp to the curve endpoints (no extrapolation - the inverse curve
+         // slope blows up near saturation and would produce wild values).
+         double yv = double( y );
+         const double y0 = curve->y[0], y1 = curve->y[curve->n - 1];
+         if ( yv <= y0 ) return float( curve->x[0] );
+         if ( yv >= y1 ) return float( curve->x[curve->n - 1] );
+         return float( EvalPchip( curve->y, curve->x, slopeI, curve->n, yv ) );
+      }
+      return InverseFKv1( y );
+   }
 
    static constexpr double M = 0.100;     // MTF midtone
    static constexpr double A = 1.4685;    // affine gain
@@ -85,9 +236,9 @@ struct FKNormalizer
       return (d == 0.0) ? m : y*m / d;
    }
 
-   float Forward( float x ) const
+   float ForwardFKv1( float x ) const
    {
-      if ( scheme != FKv1 )
+      if ( scheme == None )
          return x;
       const double lwp = std::log( 1.0 / wp );
       const double xc = std::max( double( x ), 1.0e-12 );
@@ -97,14 +248,16 @@ struct FKNormalizer
       return float( A * z + B );
    }
 
-   float Inverse( float y ) const
+   float InverseFKv1( float y ) const
    {
-      if ( scheme != FKv1 )
+      if ( scheme == None )
          return y;
       double z = ( double( y ) - B ) / A;
       if ( z < 0.0 ) z = 0.0; else if ( z > 1.0 ) z = 1.0;
       double t = MtfInv( M, z );
-      if ( t < 0.0 ) t = 0.0; else if ( t > 1.0 ) t = 1.0;
+      // Dark-end extrapolation: allow t < 0 (no clamp) so sub-background
+      // model outputs map back below the background instead of clipping.
+      if ( t > 1.0 ) t = 1.0;
       return float( wp * std::exp( t * std::log( 1.0 / wp ) ) );
    }
 };
@@ -331,24 +484,51 @@ struct FKImageReaderT : public FKImageReader
          const sample* plane = img.PixelData( srcChannel );
          for ( int y = 0; y < TH; ++y )
          {
-            int sy = iy + y;
-            if ( reflectPad )
+            const bool zeroPad = ( normalizer->scheme == FKNormalizer::FKv2 );
+            const int sy0 = iy + y;
+            int sy = sy0;
+            bool rowInside = true;
+            if ( zeroPad )
             {
-               if ( sy < 0 ) sy = -sy;
-               if ( sy >= H ) sy = 2*H - 2 - sy;
+               if ( sy0 < 0 || sy0 >= H )
+                  rowInside = false;                       // whole row is padding
             }
-            sy = std::min( std::max( sy, 0 ), H - 1 );
+            else
+            {
+               if ( reflectPad )
+               {
+                  if ( sy < 0 ) sy = -sy;
+                  if ( sy >= H ) sy = 2*H - 2 - sy;
+               }
+               sy = std::min( std::max( sy, 0 ), H - 1 );
+            }
             float* row = dst + size_t( c )*TH*TW + size_t( y )*TW;
+            if ( !rowInside )
+            {
+               std::fill( row, row + TW, 0.0f );           // BXT-exact: out-of-bounds stays 0
+               continue;
+            }
             const sample* srcRow = plane + size_t( sy )*W;
             for ( int x = 0; x < TW; ++x )
             {
                int sx = ix + x;
-               if ( reflectPad )
+               if ( zeroPad )
                {
-                  if ( sx < 0 ) sx = -sx;
-                  if ( sx >= W ) sx = 2*W - 2 - sx;
+                  if ( sx < 0 || sx >= W )
+                  {
+                     row[x] = 0.0f;                        // padding pixel, un-normalized
+                     continue;
+                  }
                }
-               sx = std::min( std::max( sx, 0 ), W - 1 );
+               else
+               {
+                  if ( reflectPad )
+                  {
+                     if ( sx < 0 ) sx = -sx;
+                     if ( sx >= W ) sx = 2*W - 2 - sx;
+                  }
+                  sx = std::min( std::max( sx, 0 ), W - 1 );
+               }
                row[x] = normalizer->Forward( ToNormFloat( srcRow[sx] ) );
             }
          }
@@ -383,14 +563,19 @@ void StoreTileCrop( std::vector<std::vector<float>>& acc,
          wsum[di] += w;
          for ( int c = 0; c < C; ++c )
          {
+            if ( replicate && C == 3 && c > 0 )
+               continue;   // mono image: the channel-averaged value is stored once (at c==0)
             float v = normalizer->Inverse( out[ size_t( c )*outTH*outTW + size_t( oy )*outTW + ox ] );
             int dstChannel = monoModel ? pass : (replicate ? 0 : c);
             if ( replicate && C == 3 )
             {
-               // mono image: average the three model output channels
-               v = ( out[ size_t( 0 )*outTH*outTW + size_t( oy )*outTW + ox ]
-                   + out[ size_t( 1 )*outTH*outTW + size_t( oy )*outTW + ox ]
-                   + out[ size_t( 2 )*outTH*outTW + size_t( oy )*outTW + ox ] ) / 3.0f;
+               // mono image: average the three model output channels in the
+               // model (normalized) domain, then invert through the curve —
+               // matching the Python reference (out.mean(axis=2) -> finv).
+               float m3 = ( out[ size_t( 0 )*outTH*outTW + size_t( oy )*outTW + ox ]
+                          + out[ size_t( 1 )*outTH*outTW + size_t( oy )*outTW + ox ]
+                          + out[ size_t( 2 )*outTH*outTW + size_t( oy )*outTW + ox ] ) / 3.0f;
+               v = normalizer->Inverse( m3 );
                dstChannel = 0;
             }
             acc[size_t( dstChannel )][di] += v * w;
@@ -457,20 +642,36 @@ static std::vector<float> Ramp( int n, int ov )
    return r;
 }
 
-// Tile origin positions: 0..size-tile step stride, last flush to the edge.
-static std::vector<int> Positions( int size, int tile, int stride )
+// Tile origin positions - PixInsight BXT-exact grid (reverse engineered from
+// RCAstroSuite-pxm.dylib FUN_000f089c and verified against its runtime tile
+// coordinates): n = ceil(size / (tile*0.8)); sx = size/n (float);
+// pos(k) = round(sx*k - (tile-sx)/2) for k = 1..n-2, first tile 0, last tile
+// size-tile. With size=6248, tile=512 this yields
+// 0,330,720,1111,1501,...,5406,5736 - exactly the BXT runtime sequence.
+static std::vector<int> Positions( int size, int tile )
 {
    std::vector<int> pos;
    if ( size <= tile )
    {
-      pos.push_back( 0 );
+      pos.push_back( std::max( 0, ( size - tile ) / 2 ) );
       return pos;
    }
-   for ( int p = 0; p <= size - tile; p += stride )
-      pos.push_back( p );
-   if ( pos.back() != size - tile )
-      pos.push_back( size - tile );
-   return pos;
+   const int n = int( std::ceil( double( size ) / ( double( tile ) * 0.8 ) ) );
+   const double sx = double( size ) / n;
+   pos.push_back( 0 );
+   for ( int k = 1; k <= n - 2; ++k )
+      pos.push_back( int( std::lround( sx * k - ( double( tile ) - sx ) / 2.0 ) ) );
+   pos.push_back( size - tile );
+   // Enforce bounds and strict monotonicity.
+   for ( int& p : pos )
+      p = std::min( std::max( p, 0 ), size - tile );
+   std::vector<int> uniq;
+   for ( int p : pos )
+      if ( uniq.empty() || p > uniq.back() )
+         uniq.push_back( p );
+   if ( uniq.back() != size - tile )
+      uniq.push_back( size - tile );
+   return uniq;
 }
 
 // ------------------------------------------------------------------
@@ -559,7 +760,7 @@ public:
 
          for ( size_type t = m_begin; t < m_end; ++t )
          {
-            const bool firstTile = ( t == 0 && C.verbose );
+            const bool firstTile = ( t - m_begin < 2 && C.verbose );
             const int pass = int( t / perPass );
             const size_type r = t % perPass;
             const int y = ys[ int( r / nx ) ];
@@ -578,7 +779,24 @@ public:
                                      C.inS, C.monoModel, C.replicate );
 
             if ( firstTile )
+            {
                pcl::Console().WriteLn( "fk-astro: stage: predict" );
+               if ( C.verbose )
+               {
+                  double s0 = 0, s1 = 0, mn = 1e30, mx = -1e30;
+                  for ( size_t i = 0; i < inBuf.size() && i < 3072*3; ++i )
+                  {
+                     s0 += inBuf[i];
+                     if ( inBuf[i] < mn ) mn = inBuf[i];
+                     if ( inBuf[i] > mx ) mx = inBuf[i];
+                  }
+                  const size_t nn = std::min( inBuf.size(), size_t( 3072*3 ) );
+                  s1 = s0 / double( nn );
+                  pcl::Console().WriteLn( pcl::IsoString().Format(
+                     "fk-astro: tile0 input (normalized): mean=%.5f min=%.5f max=%.5f",
+                     s1, mn, mx ).c_str() );
+               }
+            }
 
             if ( !C.engine->Predict( inBuf.data(), outBuf.data(),
                                      C.params.data(), C.params.size() ) )
@@ -680,16 +898,26 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
       acc.assign( size_t( N ), std::vector<float>( plane, 0.0f ) );
       wsum.assign( plane, 0.0f );
 
-      // 2-D blend window from per-axis linear ramps.
-      const std::vector<float> ry = Ramp( outTH, outTH - C.stepY );
-      const std::vector<float> rx = Ramp( outTW, outTW - C.stepX );
+      // 2-D blend window from per-axis linear ramps. The ramp width follows
+      // the actual mid-grid tile spacing (sx = size/n), matching BXT's
+      // overlap rather than the nominal 20% figure.
+      // Positions() emits exactly n+1 origins (n = ceil(size/(tile*0.8)));
+      // mid-grid spacing sx = size/n.
+      const int ny = int( ys.size() ) - 1;
+      const int nx = int( xs.size() ) - 1;
+      const double sxY = ny > 0 ? double( H ) / ny : double( outTH );
+      const double sxX = nx > 0 ? double( W ) / nx : double( outTW );
+      const int rampY = std::min( outTH, std::max( 1, outTH - int( std::lround( sxY ) ) ) );
+      const int rampX = std::min( outTW, std::max( 1, outTW - int( std::lround( sxX ) ) ) );
+      const std::vector<float> ry = Ramp( outTH, rampY );
+      const std::vector<float> rx = Ramp( outTW, rampX );
       win.assign( size_t( outTH )*outTW, 1.0f );
       for ( int y = 0; y < outTH; ++y )
          for ( int x = 0; x < outTW; ++x )
             win[ size_t( y )*outTW + x ] = ry[size_t( y )] * rx[size_t( x )];
 
-      ys = Positions( H, outTH, C.stepY );
-      xs = Positions( W, outTW, C.stepX );
+      ys = Positions( H, outTH );
+      xs = Positions( W, outTW );
    }
    else
    {
@@ -816,6 +1044,32 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
       }
    threads.Destroy();
 
+   if ( C.verbose )
+   {
+      // Main-thread diagnostics: accumulate stats before writing back.
+      double amin = 1e30, amax = -1e30, asum = 0; size_t anz = 0;
+      for ( int c = 0; c < int( acc.size() ); ++c )
+         for ( size_t i = 0; i < acc[c].size(); i += 7 )
+         {
+            double v = acc[c][i];
+            if ( v < amin ) amin = v;
+            if ( v > amax ) amax = v;
+            asum += v; ++anz;
+         }
+      double wmin = 1e30, wmax = -1e30, wsum_v = 0; size_t wnz = 0;
+      for ( size_t i = 0; i < wsum.size(); i += 7 )
+      {
+         double v = wsum[i];
+         if ( v < wmin ) wmin = v;
+         if ( v > wmax ) wmax = v;
+         wsum_v += v; ++wnz;
+      }
+      pcl::Console().WriteLn( pcl::IsoString().Format(
+         "fk-astro: diag: acc(min=%.5g max=%.5g mean=%.5g n=%zu)  w(min=%.5g max=%.5g mean=%.5g n=%zu)",
+         amin, amax, ( anz ? asum/anz : 0 ), anz,
+         wmin, wmax, ( wnz ? wsum_v/wnz : 0 ), wnz ).c_str() );
+   }
+
    // 3. Write results back.
    if ( !C.upscale && C.isCFA )
    {
@@ -833,7 +1087,10 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
             if ( ws < 1.0e-6f ) ws = 1.0f;
             float v = acc[size_t( c )][i] / ws;
             if ( v < 0.0f ) v = 0.0f; else if ( v > 1.0f ) v = 1.0f;
-            d[i] = P::FloatToSample( v );
+            if constexpr ( std::is_floating_point<sample>::value )
+               d[i] = sample( v );
+            else
+               d[i] = sample( double( v ) * double( P::HighestSampleValue() ) + 0.5 );
          }
       }
    }
@@ -843,14 +1100,39 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
       for ( int c = 0; c < N; ++c )
       {
          sample* d = img.PixelData( c );
+         const size_t i0 = size_t( C.H / 2 ) * size_t( C.W ) + size_t( C.W / 2 );
+         const bool dbg = ( c == 0 && C.verbose && i0 < plane );
          for ( size_t i = 0; i < plane; ++i )
          {
             float ws = wsum[i];
             if ( ws < 1.0e-6f ) ws = 1.0f;
             float v = acc[size_t( c )][i] / ws;
             if ( v < 0.0f ) v = 0.0f; else if ( v > 1.0f ) v = 1.0f;
-            d[i] = P::FloatToSample( v );
+            if constexpr ( std::is_floating_point<sample>::value )
+               d[i] = sample( v );
+            else
+               d[i] = sample( double( v ) * double( P::HighestSampleValue() ) + 0.5 );
+            if ( dbg && i == i0 )
+               pcl::Console().WriteLn( pcl::IsoString().Format(
+                  "fk-astro: diag: pixel %zu: acc=%.6g ws=%.6g v=%.6g d=%.6g",
+                  i0, acc[0][i0], wsum[i0], v, double( d[i0] ) ).c_str() );
          }
+      }
+      if ( C.verbose )
+      {
+         sample* d = img.PixelData( 0 );
+         double mn = 1e30, mx = -1e30, sm = 0; size_t k = 0;
+         for ( size_t i = 0; i < plane; i += 7 )
+         {
+            double v = double( d[i] );
+            if ( v < mn ) mn = v;
+            if ( v > mx ) mx = v;
+            sm += v; ++k;
+         }
+         pcl::Console().WriteLn( pcl::IsoString().Format(
+            "fk-astro: diag: after writeback: raw sample d: min=%.6g max=%.6g mean=%.6g (first 3: %g %g %g)",
+            mn, mx, sm / std::max<size_t>( k, 1 ),
+            double( d[0] ), double( d[1] ), double( d[2] ) ).c_str() );
       }
    }
    else
@@ -1064,9 +1346,10 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
    //   None : pixels pass through, 5 user parameter slots only.
    //   FKv1 : per-tile log/MTF/affine normalization + 6th parameters slot
    //          (brightness statistic, computed from the background level).
-   const bool fkv1 = ( int( p_normScheme ) == 1 );
+   const int normScheme = int( p_normScheme );
+   const bool needs6 = ( normScheme >= 1 );   // FKv1 and FKv2 both use 6 params
    double bg = 0.0, slot5 = 0.0;
-   if ( fkv1 )
+   if ( needs6 )
    {
       if ( !engine.HasParamsInput() || engine.ParamsSize() < 6 )
          throw pcl::Error( pcl::IsoString().Format(
@@ -1082,13 +1365,21 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
       bg = std::min( std::max( bg, 1.0e-12 ), 1.0 );
       slot5 = -std::log10( bg );
 
-      C.normalizer.scheme = FKNormalizer::FKv1;
+      C.normalizer.scheme = (normScheme == 2) ? FKNormalizer::FKv2
+                                             : FKNormalizer::FKv1;
       C.normalizer.wp = 0.505 * bg;
+      C.normalizer.bg = bg;
+      C.normalizer.SelectCurve();
 
       if ( p_verbose )
          pcl::Console().WriteLn( pcl::IsoString().Format(
-            "fk-astro: FKv1: bg(P35)=%.6g  slot5=-log10(bg)=%.4f  wp=0.505*bg=%.6g",
-            bg, slot5, C.normalizer.wp ).c_str() );
+            "fk-astro: FKv%c: bg(P35)=%.6g  slot5=-log10(bg)=%.4f  wp=0.505*bg=%.6g%s",
+            normScheme == 2 ? '2' : '1',
+            bg, slot5, C.normalizer.wp,
+            (normScheme == 2 && C.normalizer.curve)
+               ? pcl::IsoString().Format( "  curve bg=%.5g (%d nodes)",
+                    C.normalizer.curve->bg, C.normalizer.curve->n ).c_str()
+               : "" ).c_str() );
    }
 
    // ---- parameters tensor payload (model contract: [1,5] or [1,6]) ----
@@ -1126,7 +1417,7 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
             C.params[4] = float( p_sharpenNonstellar );
       }
       // Slot 5: brightness statistic, computed (never a user parameter).
-      if ( fkv1 && C.params.size() > 5 )
+      if ( needs6 && C.params.size() > 5 )
          C.params[5] = float( slot5 );
    }
 
@@ -1148,7 +1439,7 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
          }
          if ( p_correctOnly )
             pmsg << "  (correct only: adjustments neutralized)";
-         if ( !fkv1 && C.params.size() > 5 )
+         if ( !needs6 && C.params.size() > 5 )
             pmsg << "  (slot 5 left at 0; select FKv1 to compute it)";
       }
       else

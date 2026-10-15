@@ -157,6 +157,7 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->NormLabel.SetText( "Normalization:" );
       GUI->NormCombo.AddItem( "None" );
       GUI->NormCombo.AddItem( "FKv1" );
+      GUI->NormCombo.AddItem( "FKv2" );
       GUI->NormCombo.SetCurrentItem( m_normScheme );
       GUI->NormCombo.SetToolTip(
          "<p><b>None</b> — pixels are passed to the model unchanged and the "
