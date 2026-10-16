@@ -170,7 +170,15 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
          "the working point 0.505*bg, MTF with m=0.100, affine "
          "a=1.4685, b=-0.7095) before inference, with its inverse applied "
          "to the model output. Requires a model with a 6-element "
-         "parameters input.</p>" );
+         "parameters input.</p>"
+         "<p><b>FKv2</b> (recommended for BlurXTerminator ML5) — same "
+         "per-image background statistic and sixth slot as FKv1, but the "
+         "forward/inverse transforms use calibrated monotone curves "
+         "captured at runtime from the ML5 model inputs (FKCurves.h): "
+         "the curve whose bg is closest in log space is selected and "
+         "evaluated with monotone PCHIP interpolation, with the inverse "
+         "saturating at the curve endpoints. Requires a 6-element "
+         "parameters input (ML5 only).</p>" );
       GUI->NormCombo.OnItemSelected(
          (pcl::ComboBox::item_event_handler)&FKAstroInterface::e_NormScheme, *this );
 
