@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 #import <CoreML/CoreML.h>
 #include "CoreMLEngine.h"
+#include "TensorLayout.h"
 #include <mutex>
 #include <cstring>
 #include <typeinfo>
@@ -141,6 +142,46 @@ static std::string DescribePorts( MLModelDescription* desc, BOOL isInput )
    return s;
 }
 
+// Prefer the explicit ML5 names; use a stable order for other model ports.
+static NSArray<NSString*>* OrderedPortNames( NSDictionary<NSString*, MLFeatureDescription*>* ports,
+                                           NSString* preferred )
+{
+   NSMutableArray<NSString*>* names = [NSMutableArray arrayWithArray:
+      [[ports allKeys] sortedArrayUsingSelector:@selector(compare:)]];
+   if ( ports[preferred] != nil )
+   {
+      [names removeObject:preferred];
+      [names insertObject:preferred atIndex:0];
+   }
+   return names;
+}
+
+static std::vector<size_t> ArrayValues( NSArray<NSNumber*>* values )
+{
+   std::vector<size_t> result;
+   for ( NSNumber* value in values ) result.push_back( size_t( value.unsignedLongLongValue ) );
+   return result;
+}
+
+static void WriteArrayValue( void* data, MLMultiArrayDataType type, size_t offset, float value )
+{
+   if ( type == MLMultiArrayDataTypeFloat16 )
+      static_cast<uint16_t*>( data )[offset] = FloatToHalf( value );
+   else if ( type == MLMultiArrayDataTypeFloat64 )
+      static_cast<double*>( data )[offset] = double( value );
+   else
+      static_cast<float*>( data )[offset] = value;
+}
+
+static float ReadArrayValue( const void* data, MLMultiArrayDataType type, size_t offset )
+{
+   if ( type == MLMultiArrayDataTypeFloat16 )
+      return HalfToFloat( static_cast<const uint16_t*>( data )[offset] );
+   if ( type == MLMultiArrayDataTypeFloat64 )
+      return float( static_cast<const double*>( data )[offset] );
+   return static_cast<const float*>( data )[offset];
+}
+
 /*
  * Find the first usable multi-array port. Accepts fixed shapes of rank 2
  * (HxW), 3 (CHW/HWC) and 4 (1CHW/1HWC). Enumerated flexible shapes are
@@ -148,13 +189,15 @@ static std::string DescribePorts( MLModelDescription* desc, BOOL isInput )
  */
 static bool GetMultiArrayPort( MLModelDescription* desc, BOOL isInput,
                                NSString** outName, TensorShape* outShape, bool* chw,
-                               int* nativeRank, int* nativeDims, int* dataType )
+                               int* nativeRank, int* nativeDims, int* dataType, NSString* excluded = nil )
 {
    NSDictionary<NSString*, MLFeatureDescription*>* ports =
          isInput ? desc.inputDescriptionsByName : desc.outputDescriptionsByName;
 
-   for ( NSString* name in ports )
+   for ( NSString* name in OrderedPortNames( ports, isInput ? @"input" : @"output" ) )
    {
+      if ( isInput && excluded != nil && [name isEqualToString:excluded] )
+         continue;
       MLFeatureDescription* fd = ports[name];
       MLMultiArrayConstraint* constraint = fd.multiArrayConstraint;
       if ( constraint == nil )
@@ -235,8 +278,10 @@ static bool GetMultiArrayPort( MLModelDescription* desc, BOOL isInput,
 static NSString* GetParamsPort( MLModelDescription* desc, size_t* outSize,
                                 int* outRank, int* outDims, int* dataType )
 {
-   for ( NSString* name in desc.inputDescriptionsByName )
+   for ( NSString* name in OrderedPortNames( desc.inputDescriptionsByName, @"parameters" ) )
    {
+      if ( [name isEqualToString:@"input"] )
+         continue;
       MLFeatureDescription* fd = desc.inputDescriptionsByName[name];
       MLMultiArrayConstraint* c = fd.multiArrayConstraint;
       if ( c == nil )
@@ -388,7 +433,7 @@ bool CoreMLEngine::Load( const std::string& path, int device )
    int inDataType = int( MLMultiArrayDataTypeFloat32 );
    int outDataType = int( MLMultiArrayDataTypeFloat32 );
 
-   if ( !GetMultiArrayPort( desc, YES, &inName, &inS, &inCHW, &inRank, inDims, &inDataType ) )
+   if ( !GetMultiArrayPort( desc, YES, &inName, &inS, &inCHW, &inRank, inDims, &inDataType, paramsName ) )
    {
       m_lastError = "no usable multi-array input (fixed shape, rank 2-4, "
                     "batch dim 1). Model inputs: " + DescribePorts( desc, YES );
@@ -535,38 +580,13 @@ bool CoreMLEngine::PredictLocked( const float* in, float* out, const float* para
       m_lastError = "input multi-array element count mismatch";
       return false;
    }
-   if ( arrayType == MLMultiArrayDataTypeFloat16 )
-   {
-      uint16_t* dst = static_cast<uint16_t*>( array.dataPointer );
-      if ( m_inputCHW )
-      {
-         for ( size_t i = 0; i < n; ++i )
-            dst[i] = FloatToHalf( in[i] );
-      }
-      else
-      {
-         for ( int c = 0; c < C; ++c )
-            for ( int y = 0; y < H; ++y )
-               for ( int x = 0; x < W; ++x )
-                  dst[ (size_t( y )*W + x)*C + c ] =
-                        FloatToHalf( in[ size_t( c )*H*W + size_t( y )*W + x ] );
-      }
-   }
-   else
-   {
-      float* dst = static_cast<float*>( array.dataPointer );
-      if ( m_inputCHW )
-      {
-         std::memcpy( dst, in, n * sizeof( float ) ); // contiguous CHW
-      }
-      else
-      {
-         for ( int c = 0; c < C; ++c )
-            for ( int y = 0; y < H; ++y )
-               for ( int x = 0; x < W; ++x )
-                  dst[ (size_t( y )*W + x)*C + c ] = in[ size_t( c )*H*W + size_t( y )*W + x ];
-      }
-   }
+   void* inputData = array.dataPointer;
+   const auto inputStrides = ArrayValues( array.strides );
+   for ( int c = 0; c < C; ++c )
+      for ( int y = 0; y < H; ++y )
+         for ( int x = 0; x < W; ++x )
+            WriteArrayValue( inputData, arrayType, ImageOffset( inputStrides, m_inputCHW, c, y, x ),
+               in[size_t( c ) * H * W + size_t( y ) * W + x] );
 
    MLFeatureValue* featureValue = [MLFeatureValue featureValueWithMultiArray:array];
    NSMutableDictionary* features = [NSMutableDictionary dictionaryWithObject:featureValue forKey:inName];
@@ -578,7 +598,8 @@ bool CoreMLEngine::PredictLocked( const float* in, float* out, const float* para
       for ( int i = 0; i < m_paramsRank; ++i )
          [paramsShape addObject:@( m_paramsDims[i] )];
       MLMultiArrayDataType pType = MLMultiArrayDataType( m_paramsDataType );
-      if ( pType != MLMultiArrayDataTypeFloat16 && pType != MLMultiArrayDataTypeFloat32 )
+      if ( pType != MLMultiArrayDataTypeFloat16 && pType != MLMultiArrayDataTypeFloat32
+           && pType != MLMultiArrayDataTypeFloat64 )
          pType = MLMultiArrayDataTypeFloat32;
       MLMultiArray* paramsArray =
             [[MLMultiArray alloc] initWithShape:paramsShape
@@ -589,18 +610,12 @@ bool CoreMLEngine::PredictLocked( const float* in, float* out, const float* para
          m_lastError = "params MLMultiArray allocation failed";
          return false;
       }
-      if ( pType == MLMultiArrayDataTypeFloat16 )
-      {
-         uint16_t* pd = static_cast<uint16_t*>( paramsArray.dataPointer );
-         for ( size_t i = 0; i < m_paramsSize; ++i )
-            pd[i] = FloatToHalf( (params != nullptr && i < paramCount) ? params[i] : 0.0f );
-      }
-      else
-      {
-         float* pd = static_cast<float*>( paramsArray.dataPointer );
-         for ( size_t i = 0; i < m_paramsSize; ++i )
-            pd[i] = (params != nullptr && i < paramCount) ? params[i] : 0.0f;
-      }
+      void* paramData = paramsArray.dataPointer;
+      const auto paramShape = ArrayValues( paramsArray.shape );
+      const auto paramStrides = ArrayValues( paramsArray.strides );
+      for ( size_t i = 0; i < m_paramsSize; ++i )
+         WriteArrayValue( paramData, pType, LinearOffset( i, paramShape, paramStrides ),
+            ( params != nullptr && i < paramCount ) ? params[i] : 0.0f );
       features[paramsName] = [MLFeatureValue featureValueWithMultiArray:paramsArray];
    }
 
@@ -640,40 +655,32 @@ bool CoreMLEngine::PredictLocked( const float* in, float* out, const float* para
    }
 
    const int oC = m_outputShape.c, oH = m_outputShape.h, oW = m_outputShape.w;
-   const bool outIsF16 = ( m_outDataType == int( MLMultiArrayDataTypeFloat16 ) );
-
-   if ( outIsF16 )
+   if ( outArray.dataType != MLMultiArrayDataTypeFloat16
+        && outArray.dataType != MLMultiArrayDataTypeFloat32
+        && outArray.dataType != MLMultiArrayDataTypeFloat64 )
    {
-      const uint16_t* src = static_cast<const uint16_t*>( outArray.dataPointer );
-      if ( m_outputCHW )
-      {
-         for ( size_t i = 0; i < nOut; ++i )
-            out[i] = HalfToFloat( src[i] );
-      }
-      else
-      {
-         for ( int c = 0; c < oC; ++c )
-            for ( int y = 0; y < oH; ++y )
-               for ( int x = 0; x < oW; ++x )
-                  out[ size_t( c )*oH*oW + size_t( y )*oW + x ] =
-                        HalfToFloat( src[ (size_t( y )*oW + x)*oC + c ] );
-      }
+      m_lastError = "output multi-array must contain floating point samples";
+      return false;
    }
-   else
+   if ( outArray.shape.count != NSUInteger( m_outRank ) )
    {
-      const float* src = static_cast<const float*>( outArray.dataPointer );
-      if ( m_outputCHW )
-      {
-         std::memcpy( out, src, nOut * sizeof( float ) );
-      }
-      else
-      {
-         for ( int c = 0; c < oC; ++c )
-            for ( int y = 0; y < oH; ++y )
-               for ( int x = 0; x < oW; ++x )
-                  out[ size_t( c )*oH*oW + size_t( y )*oW + x ] = src[ (size_t( y )*oW + x)*oC + c ];
-      }
+      m_lastError = "output multi-array rank changed";
+      return false;
    }
+   for ( int d = 0; d < m_outRank; ++d )
+      if ( outArray.shape[d].integerValue != m_outDims[d] )
+      {
+         m_lastError = "output multi-array shape changed";
+         return false;
+      }
+   const void* outputData = outArray.dataPointer;
+   const MLMultiArrayDataType outputType = outArray.dataType;
+   const auto outputStrides = ArrayValues( outArray.strides );
+   for ( int c = 0; c < oC; ++c )
+      for ( int y = 0; y < oH; ++y )
+         for ( int x = 0; x < oW; ++x )
+            out[size_t( c ) * oH * oW + size_t( y ) * oW + x] =
+               ReadArrayValue( outputData, outputType, ImageOffset( outputStrides, m_outputCHW, c, y, x ) );
    return true;
 }
 

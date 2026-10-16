@@ -51,6 +51,12 @@ BASE_CXXFLAGS = -pipe -pthread -fPIC -isysroot "$(SDK)" -mmacosx-version-min=14 
 
 BASE_CFLAGS = -pipe -O2 -fPIC -isysroot "$(SDK)" -mmacosx-version-min=14
 
+# Keep the recovered float32 -> float64 rounding boundaries in the host math.
+# FMA is explicit where recovered; reassociation/implicit contraction can move
+# an ML5 tile origin by one pixel. PCL keeps its original build flags.
+MODULE_CXXFLAGS = $(filter-out -ffast-math -ffp-contract=on,$(BASE_CXXFLAGS)) \
+   -fno-fast-math -ffp-contract=off
+
 # --- module sources -------------------------------------------------
 
 MODULE_CPP := $(wildcard src/*.cpp)
@@ -179,13 +185,13 @@ build/$(1)/FKAstro-pxm.dylib: $$(MODULE_OBJS_$(1)) \
 	   -framework AppKit -framework Foundation -framework CoreML \
 	   -lpthread -lPCL-pxi -llz4-pxi -lzstd-pxi -lzlib-pxi -lRFC6234-pxi -llcms-pxi
 
-build/$(1)/module/%.o: src/%.cpp
+build/$(1)/module/%.o: src/%.cpp $$(wildcard src/*.h) Makefile
 	@mkdir -p $$(@D)
-	$$(CXX) $$(BASE_CXXFLAGS) -Isrc -arch $$(ARCH_CLANG_$(1)) -c -o $$@ $$<
+	$$(CXX) $$(MODULE_CXXFLAGS) -Isrc -arch $$(ARCH_CLANG_$(1)) -c -o $$@ $$<
 
-build/$(1)/module/%.o: src/%.mm
+build/$(1)/module/%.o: src/%.mm $$(wildcard src/*.h) Makefile
 	@mkdir -p $$(@D)
-	$$(CXX) $$(BASE_CXXFLAGS) -Isrc -arch $$(ARCH_CLANG_$(1)) -fobjc-arc -fobjc-arc-exceptions -c -o $$@ $$<
+	$$(CXX) $$(MODULE_CXXFLAGS) -Isrc -arch $$(ARCH_CLANG_$(1)) -fobjc-arc -fobjc-arc-exceptions -c -o $$@ $$<
 
 endef
 

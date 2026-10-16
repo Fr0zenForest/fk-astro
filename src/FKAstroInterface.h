@@ -54,9 +54,7 @@ private:
    void e_Verbose( pcl::Button& sender, pcl::Button::check_state state );
    void e_Section( pcl::SectionBar& sender, pcl::Control& section, bool start );
 
-   // Apply the enable/disable cascade: when Correct Only is checked, all
-   // adjustment controls are disabled; PSF diameter additionally requires
-   // Automatic PSF to be unchecked.
+   // Apply Correct Only and ML5 Lunar/Planetary disabledIf rules.
    void UpdateEnabledStates();
 
    // Interface state (valid before GUI exists)
@@ -67,8 +65,8 @@ private:
    bool        m_autoPSF      = true;
    double      m_psfDiameter  = 0.0;         // [0, 8]
    bool        m_correctOnly  = true;
-   bool        m_lunarPlanetary = false; // mode flag, not a tensor column
-   int         m_normScheme   = 0;    // 0=None 1=FKv1 2=FKv2
+   bool        m_lunarPlanetary = false;
+   int         m_normScheme   = 3;    // 0=None 1=FKv1 2=FKv2 3=ML5
    bool        m_reflectPad   = true;
    double      m_tileOverlap  = 0.2;         // fraction [0, 0.5]
    int         m_device       = 0;

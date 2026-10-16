@@ -25,6 +25,7 @@
 
 #include "FKAstroProcess.h"
 #include "FKCurves.h"
+#include "ML5Pipeline.h"
 #include "CoreMLEngine.h"
 
 #include <vector>
@@ -33,6 +34,8 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <cstring>
+#include <mutex>
 
 namespace
 {
@@ -67,12 +70,13 @@ float ToNormFloat( S v )
 // ---------------------------------------------------------------------------
 struct FKNormalizer
 {
-   enum Scheme { None = 0, FKv1 = 1, FKv2 = 2 };
+   enum Scheme { None = 0, FKv1 = 1, FKv2 = 2, ML5 = 3 };
 
    Scheme scheme = None;
    double wp = 0.01;   // FKv1 working point, = 0.505 * background level
    double bg = 0.01;   // image background statistic (curve selection for FKv2)
    const fka::FKCurve* curve = nullptr;   // FKv2 selected curve
+   fka::ml5::ArcsinhNormalizer ml5;
 
    // FKv2: pick the calibration curve whose bg is closest in log space.
    void SelectCurve()
@@ -201,6 +205,8 @@ struct FKNormalizer
 
    float Forward( float x ) const
    {
+      if ( scheme == ML5 )
+         return float( ml5.Forward( double( x ) ) );
       if ( scheme == FKv2 && curve != nullptr )
          return float( Interp( curve->x, curve->y, curve->n, x ) );
       return ForwardFKv1( x );
@@ -208,6 +214,8 @@ struct FKNormalizer
 
    float Inverse( float y ) const
    {
+      if ( scheme == ML5 )
+         return float( ml5.Inverse( double( y ) ) );
       if ( scheme == FKv2 && curve != nullptr && slopeIN == curve->n )
       {
          // Saturation semantics: model outputs beyond the calibration range
@@ -460,6 +468,60 @@ static double FKLog10Gain( const pcl::ImageVariant& image )
    return std::log10( 1.0 / std::asinh( 1.0 ) );
 }
 
+template <class P>
+static fka::ml5::ArcsinhNormalizer FitML5T( const pcl::GenericImage<P>& img, bool lunar )
+{
+   fka::ml5::ArcsinhNormalizer state;
+   state.Fit( img.Width(), img.Height(), img.NumberOfChannels(), lunar,
+      [&]( int c, int y, int x )
+      {
+         return fka::ml5::SampleToDouble( img.PixelData( c )[size_t( y ) * img.Width() + x] );
+      } );
+   return state;
+}
+
+static fka::ml5::ArcsinhNormalizer FitML5( const pcl::ImageVariant& image, bool lunar )
+{
+   if ( image.IsFloatSample() )
+      switch ( image.BitsPerSample() )
+      {
+      case 32: return FitML5T( static_cast<const pcl::Image&>( *image ), lunar );
+      case 64: return FitML5T( static_cast<const pcl::DImage&>( *image ), lunar );
+      }
+   else
+      switch ( image.BitsPerSample() )
+      {
+      case 8:  return FitML5T( static_cast<const pcl::UInt8Image&>( *image ), lunar );
+      case 16: return FitML5T( static_cast<const pcl::UInt16Image&>( *image ), lunar );
+      case 32: return FitML5T( static_cast<const pcl::UInt32Image&>( *image ), lunar );
+      }
+   throw pcl::Error( "fk-astro: unsupported sample format for ML5 normalization." );
+}
+
+template <class P>
+static void WriteML5T( pcl::GenericImage<P>& img, const fka::ml5::ArcsinhNormalizer& state,
+                      const std::vector<std::vector<double>>& modelAcc, bool replicate )
+{
+   using sample = typename P::sample;
+   const size_t plane = size_t( img.Width() ) * img.Height();
+   for ( int c = 0; c < img.NumberOfChannels(); ++c )
+   {
+      sample* dst = img.PixelData( c );
+      for ( size_t i = 0; i < plane; ++i )
+      {
+         double value = modelAcc[size_t( c )][i];
+         if ( replicate )
+         {
+            value = 0;
+            for ( const auto& channel : modelAcc ) value += channel[i];
+            value /= modelAcc.size();
+         }
+         value = std::clamp( state.Inverse( value ), 0.0, 1.0 );
+         dst[i] = fka::ml5::SampleFromDouble<sample>( value );
+      }
+   }
+}
+
 // Local half-float conversions for memory-lean accumulators.
 static uint16_t FK_ToHalf( float f );
 static float FK_ToFloat( uint16_t h );
@@ -626,7 +688,8 @@ struct FKImageReaderT : public FKImageReader
          const sample* plane = img.PixelData( srcChannel );
          for ( int y = 0; y < TH; ++y )
          {
-            const bool zeroPad = ( normalizer->scheme == FKNormalizer::FKv2 );
+            const bool zeroPad = normalizer->scheme == FKNormalizer::FKv2
+                              || normalizer->scheme == FKNormalizer::ML5;
             const int sy0 = iy + y;
             int sy = sy0;
             bool rowInside = true;
@@ -671,7 +734,9 @@ struct FKImageReaderT : public FKImageReader
                   }
                   sx = std::min( std::max( sx, 0 ), W - 1 );
                }
-               row[x] = normalizer->Forward( ToNormFloat( srcRow[sx] ) );
+               row[x] = normalizer->scheme == FKNormalizer::ML5
+                  ? float( normalizer->ml5.Forward( fka::ml5::SampleToDouble( srcRow[sx] ) ) )
+                  : normalizer->Forward( ToNormFloat( srcRow[sx] ) );
             }
          }
       }
@@ -882,6 +947,10 @@ struct FKAstroThreadData : public pcl::AbstractImage::ThreadData
    const FKNormalizer* normalizer = nullptr;
    // center-crop mode
    std::vector<std::vector<float>>* acc = nullptr;
+   std::vector<std::vector<double>>* modelAcc = nullptr;
+   const std::vector<std::vector<double>>* xWindows = nullptr;
+   const std::vector<std::vector<double>>* yWindows = nullptr;
+   std::mutex fusionMutex; // both workers can produce overlapping tiles
    std::vector<float>* wsum = nullptr;
    const std::vector<float>* win = nullptr;
    // upscale mode
@@ -974,14 +1043,22 @@ public:
 
             if ( !C.upscale )
             {
-               const int ph = std::min( outTH, H - y );
-               const int pw = std::min( outTW, W - x );
-               const int py = ( y + outTH > H ) ? outTH - ph : 0;
-               const int px = ( x + outTW > W ) ? outTW - pw : 0;
-
-               StoreTileCrop( *m_data.acc, *m_data.wsum, outBuf.data(), pass,
-                              x, y, ph, pw, py, px, outTH, outTW, *m_data.win,
-                              C.outS, C.monoModel, W, N, C.replicate, normalizer );
+               std::lock_guard<std::mutex> guard( m_data.fusionMutex );
+               if ( normalizer->scheme == FKNormalizer::ML5 )
+                  fka::ml5::BlendTile( outBuf.data(), C.outS.c, outTW, outTH,
+                     x, y, W, H, (*m_data.xWindows)[size_t( r % nx )],
+                     (*m_data.yWindows)[size_t( r / nx )],
+                     [&]( int c, size_t i, double value ) { (*m_data.modelAcc)[size_t( c )][i] += value; } );
+               else
+               {
+                  const int ph = std::min( outTH, H - y );
+                  const int pw = std::min( outTW, W - x );
+                  const int py = ( y + outTH > H ) ? outTH - ph : 0;
+                  const int px = ( x + outTW > W ) ? outTW - pw : 0;
+                  StoreTileCrop( *m_data.acc, *m_data.wsum, outBuf.data(), pass,
+                                 x, y, ph, pw, py, px, outTH, outTW, *m_data.win,
+                                 C.outS, C.monoModel, W, N, C.replicate, normalizer );
+               }
             }
             else
             {
@@ -1050,13 +1127,27 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
 
    // Shared output accumulators / destination.
    std::vector<std::vector<float>> acc;
+   std::vector<std::vector<double>> modelAcc;
+   std::vector<std::vector<double>> xWindows, yWindows;
    std::vector<float> wsum;
    std::vector<float> win;
    std::vector<std::vector<float>> dst;
    std::vector<int> ys, xs;
    int outTH = C.outTileH, outTW = C.outTileW;
 
-   if ( !C.upscale )
+   const bool ml5 = C.normalizer.scheme == FKNormalizer::ML5;
+   if ( ml5 )
+   {
+      // Match the host's double model-space sum, with one inverse after
+      // fusion. The seam windows define the sum; do not divide by wsum.
+      modelAcc.assign( size_t( C.outS.c ), std::vector<double>( plane, 0.0 ) );
+      const fka::ml5::AxisGrid gx( W, outTW, C.tileOverlap ), gy( H, outTH, C.tileOverlap );
+      xs = gx.origins;
+      ys = gy.origins;
+      for ( size_t k = 0; k < xs.size(); ++k ) xWindows.push_back( gx.Window( k ) );
+      for ( size_t k = 0; k < ys.size(); ++k ) yWindows.push_back( gy.Window( k ) );
+   }
+   else if ( !C.upscale )
    {
       acc.assign( size_t( N ), std::vector<float>( plane, 0.0f ) );
       wsum.assign( plane, 0.0f );
@@ -1123,6 +1214,9 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
    data.C = &C;
    data.reader = &reader;
    data.acc = &acc;
+   data.modelAcc = &modelAcc;
+   data.xWindows = &xWindows;
+   data.yWindows = &yWindows;
    data.wsum = &wsum;
    data.win = &win;
    data.dst = &dst;
@@ -1195,12 +1289,13 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
    for ( FKAstroTileThread& thread : threads )
       if ( !thread.m_error.IsEmpty() )
       {
+         const pcl::String error = thread.m_error;
          threads.Destroy();
-         throw pcl::Error( thread.m_error );
+         throw pcl::Error( error );
       }
    threads.Destroy();
 
-   if ( C.verbose )
+   if ( C.verbose && !ml5 )
    {
       // Main-thread diagnostics: accumulate stats before writing back.
       double amin = 1e30, amax = -1e30, asum = 0; size_t anz = 0;
@@ -1227,7 +1322,9 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
    }
 
    // 3. Write results back.
-   if ( !C.upscale && C.isCFA )
+   if ( ml5 )
+      WriteML5T( img, C.normalizer.ml5, modelAcc, C.replicate );
+   else if ( !C.upscale && C.isCFA )
    {
       // Re-mosaic: keep the raw Bayer structure, sample the channel that
       // matches each pixel's CFA site.
@@ -1504,14 +1601,50 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
    C.verbose = p_verbose;
    C.reflectPad = p_reflectPad;
 
-   // ---- normalization scheme (PIPELINE.md) ----
+   // ---- normalization scheme ----
    //   None : pixels pass through, 5 user parameter slots only.
    //   FKv1 : log/MTF/affine curve. FKv2 : calibrated PCHIP curve.
    //          Both write column 5 as log10gain. wp and FKv2 selection use P35.
    const int normScheme = int( p_normScheme );
-   const bool needs6 = ( normScheme >= 1 );   // FKv1 and FKv2 both use 6 params
+   if ( normScheme < FKNormalizer::None || normScheme > FKNormalizer::ML5 )
+      throw pcl::Error( "fk-astro: unknown normalization scheme." );
+   const bool ml5 = normScheme == FKNormalizer::ML5;
+   fka::ml5::Settings controls;
+   controls.stars = p_sharpenStars;
+   controls.halos = p_adjustStarHalos;
+   controls.diameter = p_psfDiameter;
+   controls.nonstellar = p_sharpenNonstellar;
+   controls.autoPSF = p_autoPSF;
+   controls.correctOnly = p_correctOnly;
+   controls.lunar = p_lunarPlanetary;
+   const fka::ml5::Settings effective = controls.Effective();
+   const bool needs6 = ( normScheme >= 1 );
    double bg = 0.0, slot5 = 0.0;
-   if ( needs6 )
+   if ( ml5 )
+   {
+      if ( inS.c != 3 || inS.h != 1024 || inS.w != 1024
+           || outS.c != 3 || outS.h != 512 || outS.w != 512
+           || !engine.HasParamsInput() || engine.ParamsSize() != 6 )
+         throw pcl::Error( "fk-astro: ML5 requires 1024x1024x3 input, "
+                           "512x512x3 output and exactly 6 parameters." );
+      const int cfa = view.Window().FileInfo().cfaType;
+      if ( cfa >= pcl::CFAType::BGGR && cfa <= pcl::CFAType::RGGB )
+         throw pcl::Error( "fk-astro: debayer the CFA image before using ML5." );
+      C.normalizer.scheme = FKNormalizer::ML5;
+      C.normalizer.ml5 = FitML5( image, effective.lunar );
+      C.reflectPad = false; // ML5 catalog: reflectionPad=false
+      slot5 = C.normalizer.ml5.gain;
+      if ( p_verbose )
+      {
+         const auto& n = C.normalizer.ml5;
+         pcl::Console().WriteLn( pcl::IsoString().Format(
+            "fk-astro: ML5 arcsinh,wp=1: low=%.17g high=%.17g median=%.17g "
+            "x=%.17g log10gain=%.17g; grid=%dx%d positive=%zu lp=%s",
+            n.low, n.high, n.median, n.x, n.gain, n.gridW, n.gridH,
+            n.positiveSamples, effective.lunar ? "on" : "off" ).c_str() );
+      }
+   }
+   else if ( needs6 )
    {
       if ( !engine.HasParamsInput() || engine.ParamsSize() < 6 )
          throw pcl::Error( pcl::IsoString().Format(
@@ -1545,13 +1678,18 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
    }
 
    // ---- parameters tensor payload (model contract: [1,5] or [1,6]) ----
-   //   [0] sharpenStars        [1] adjustStarHalos in [0,1]
+   //   [0] sharpenStars        [1] adjustStarHalos in [-0.5,0.5]
    //   [2] psfDiameter/2       [3] autoPSF flag (1/0)
-   //   [4] sharpenNonstellar   [5] log10gain (FKv1 and FKv2)
+   //   [4] sharpenNonstellar   [5] log10gain (all normalized schemes)
    if ( engine.HasParamsInput() )
    {
       C.params.assign( engine.ParamsSize(), 0.0f );
-      if ( p_correctOnly )
+      if ( ml5 )
+      {
+         const auto values = controls.Parameters( C.normalizer.ml5.gain );
+         std::copy( values.begin(), values.end(), C.params.begin() );
+      }
+      else if ( p_correctOnly )
       {
          // Correct Only: all adjustments are neutralized at runtime.
          //   [0] sharpenStars    = 0
@@ -1597,19 +1735,20 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
          for ( size_t i = 0; i < C.params.size(); ++i )
          {
             pmsg << ( i < 6 ? names[i] : " unused" )
-                 << pcl::IsoString().Format( "=%.4f", double( C.params[i] ) );
+                 << pcl::IsoString().Format( "=%.9g", double( C.params[i] ) );
          }
          if ( p_correctOnly )
             pmsg << "  (correct only: adjustments neutralized)";
          if ( !needs6 && C.params.size() > 5 )
-            pmsg << "  (slot 5 left at 0; select FKv1 to compute it)";
+            pmsg << "  (slot 5 left at 0; select ML5 for the ML5 contract)";
       }
       else
          pmsg = "fk-astro: params: model has no parameters input";
       pcl::Console().WriteLn( pcl::String( pmsg ) );
       pcl::Console().WriteLn( pcl::IsoString().Format(
-         "fk-astro: lunarPlanetary=%s (mode flag, not a parameters column)",
-         p_lunarPlanetary ? "on" : "off" ).c_str() );
+         "fk-astro: lunarPlanetary=%s%s",
+         ( ml5 ? effective.lunar : p_lunarPlanetary ) ? "on" : "off",
+         ml5 ? " (effective ML5 mode)" : " (stored flag; legacy path)" ).c_str() );
    }
 
    // ---- channel mapping ----
@@ -1656,6 +1795,7 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
    C.outTileW = outTileW;
    C.outTileH = outTileH;
    const double frac = std::min( std::max( p_tileOverlap, 0.0 ), 0.5 );
+   C.tileOverlap = frac;
 
    if ( outTileH <= inS.h && outTileW <= inS.w )
    {
