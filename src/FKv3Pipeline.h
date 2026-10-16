@@ -1,8 +1,9 @@
 #pragma once
 
-// ML5 host contract recovered from RCAstroSuite-pxm.dylib (ARM64).
+// FKv3 host pipeline, based on the ML5 contract recovered from
+// RCAstroSuite-pxm.dylib (ARM64).
 // This file has no PCL/CoreML dependency so the production math can be tested
-// offline. See docs/ML5.md for evidence addresses and verification limits.
+// offline. See docs/FKv3.md for evidence addresses and verification limits.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -14,7 +15,7 @@
 
 namespace fka
 {
-namespace ml5
+namespace fkv3
 {
 
 template <class S>
@@ -83,7 +84,7 @@ struct ArcsinhNormalizer
    {
       *this = ArcsinhNormalizer();
       if ( width < 1 || height < 1 || channels < 1 )
-         throw std::invalid_argument( "ML5 normalization requires a nonempty image" );
+         throw std::invalid_argument( "FKv3 normalization requires a nonempty image" );
       cropX = int( width * 0.05 );
       cropY = int( height * 0.05 );
       cropW = width - 2 * cropX;
@@ -161,7 +162,7 @@ struct AxisGrid
    AxisGrid( int size, int tileSize, double fraction ) : tile( tileSize )
    {
       if ( size < 1 || tile < 1 )
-         throw std::invalid_argument( "ML5 tile dimensions must be positive" );
+         throw std::invalid_argument( "FKv3 tile dimensions must be positive" );
       const float f = float( std::clamp( fraction, 0.0, 0.5 ) );
       overlap = 2 * int( std::floor( float( tile ) * f * 0.5f ) );
       const int count = size <= tile ? 1 : int( std::ceil( double( size ) / ( tile - overlap ) ) );
@@ -227,5 +228,5 @@ void BlendTile( const float* output, int channels, int tileW, int tileH,
       }
 }
 
-} // namespace ml5
+} // namespace fkv3
 } // namespace fka

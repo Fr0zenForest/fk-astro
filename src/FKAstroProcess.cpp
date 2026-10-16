@@ -25,7 +25,7 @@
 
 #include "FKAstroProcess.h"
 #include "FKCurves.h"
-#include "ML5Pipeline.h"
+#include "FKv3Pipeline.h"
 #include "CoreMLEngine.h"
 
 #include <vector>
@@ -70,13 +70,13 @@ float ToNormFloat( S v )
 // ---------------------------------------------------------------------------
 struct FKNormalizer
 {
-   enum Scheme { None = 0, FKv1 = 1, FKv2 = 2, ML5 = 3 };
+   enum Scheme { None = 0, FKv1 = 1, FKv2 = 2, FKv3 = 3 };
 
    Scheme scheme = None;
    double wp = 0.01;   // FKv1 working point, = 0.505 * background level
    double bg = 0.01;   // image background statistic (curve selection for FKv2)
    const fka::FKCurve* curve = nullptr;   // FKv2 selected curve
-   fka::ml5::ArcsinhNormalizer ml5;
+   fka::fkv3::ArcsinhNormalizer fkv3;
 
    // FKv2: pick the calibration curve whose bg is closest in log space.
    void SelectCurve()
@@ -205,8 +205,8 @@ struct FKNormalizer
 
    float Forward( float x ) const
    {
-      if ( scheme == ML5 )
-         return float( ml5.Forward( double( x ) ) );
+      if ( scheme == FKv3 )
+         return float( fkv3.Forward( double( x ) ) );
       if ( scheme == FKv2 && curve != nullptr )
          return float( Interp( curve->x, curve->y, curve->n, x ) );
       return ForwardFKv1( x );
@@ -214,8 +214,8 @@ struct FKNormalizer
 
    float Inverse( float y ) const
    {
-      if ( scheme == ML5 )
-         return float( ml5.Inverse( double( y ) ) );
+      if ( scheme == FKv3 )
+         return float( fkv3.Inverse( double( y ) ) );
       if ( scheme == FKv2 && curve != nullptr && slopeIN == curve->n )
       {
          // Saturation semantics: model outputs beyond the calibration range
@@ -469,37 +469,37 @@ static double FKLog10Gain( const pcl::ImageVariant& image )
 }
 
 template <class P>
-static fka::ml5::ArcsinhNormalizer FitML5T( const pcl::GenericImage<P>& img, bool lunar )
+static fka::fkv3::ArcsinhNormalizer FitFKv3T( const pcl::GenericImage<P>& img, bool lunar )
 {
-   fka::ml5::ArcsinhNormalizer state;
+   fka::fkv3::ArcsinhNormalizer state;
    state.Fit( img.Width(), img.Height(), img.NumberOfChannels(), lunar,
       [&]( int c, int y, int x )
       {
-         return fka::ml5::SampleToDouble( img.PixelData( c )[size_t( y ) * img.Width() + x] );
+         return fka::fkv3::SampleToDouble( img.PixelData( c )[size_t( y ) * img.Width() + x] );
       } );
    return state;
 }
 
-static fka::ml5::ArcsinhNormalizer FitML5( const pcl::ImageVariant& image, bool lunar )
+static fka::fkv3::ArcsinhNormalizer FitFKv3( const pcl::ImageVariant& image, bool lunar )
 {
    if ( image.IsFloatSample() )
       switch ( image.BitsPerSample() )
       {
-      case 32: return FitML5T( static_cast<const pcl::Image&>( *image ), lunar );
-      case 64: return FitML5T( static_cast<const pcl::DImage&>( *image ), lunar );
+      case 32: return FitFKv3T( static_cast<const pcl::Image&>( *image ), lunar );
+      case 64: return FitFKv3T( static_cast<const pcl::DImage&>( *image ), lunar );
       }
    else
       switch ( image.BitsPerSample() )
       {
-      case 8:  return FitML5T( static_cast<const pcl::UInt8Image&>( *image ), lunar );
-      case 16: return FitML5T( static_cast<const pcl::UInt16Image&>( *image ), lunar );
-      case 32: return FitML5T( static_cast<const pcl::UInt32Image&>( *image ), lunar );
+      case 8:  return FitFKv3T( static_cast<const pcl::UInt8Image&>( *image ), lunar );
+      case 16: return FitFKv3T( static_cast<const pcl::UInt16Image&>( *image ), lunar );
+      case 32: return FitFKv3T( static_cast<const pcl::UInt32Image&>( *image ), lunar );
       }
-   throw pcl::Error( "fk-astro: unsupported sample format for ML5 normalization." );
+   throw pcl::Error( "fk-astro: unsupported sample format for FKv3 normalization." );
 }
 
 template <class P>
-static void WriteML5T( pcl::GenericImage<P>& img, const fka::ml5::ArcsinhNormalizer& state,
+static void WriteFKv3T( pcl::GenericImage<P>& img, const fka::fkv3::ArcsinhNormalizer& state,
                       const std::vector<std::vector<double>>& modelAcc, bool replicate )
 {
    using sample = typename P::sample;
@@ -517,7 +517,7 @@ static void WriteML5T( pcl::GenericImage<P>& img, const fka::ml5::ArcsinhNormali
             value /= modelAcc.size();
          }
          value = std::clamp( state.Inverse( value ), 0.0, 1.0 );
-         dst[i] = fka::ml5::SampleFromDouble<sample>( value );
+         dst[i] = fka::fkv3::SampleFromDouble<sample>( value );
       }
    }
 }
@@ -689,7 +689,7 @@ struct FKImageReaderT : public FKImageReader
          for ( int y = 0; y < TH; ++y )
          {
             const bool zeroPad = normalizer->scheme == FKNormalizer::FKv2
-                              || normalizer->scheme == FKNormalizer::ML5;
+                              || normalizer->scheme == FKNormalizer::FKv3;
             const int sy0 = iy + y;
             int sy = sy0;
             bool rowInside = true;
@@ -734,8 +734,8 @@ struct FKImageReaderT : public FKImageReader
                   }
                   sx = std::min( std::max( sx, 0 ), W - 1 );
                }
-               row[x] = normalizer->scheme == FKNormalizer::ML5
-                  ? float( normalizer->ml5.Forward( fka::ml5::SampleToDouble( srcRow[sx] ) ) )
+               row[x] = normalizer->scheme == FKNormalizer::FKv3
+                  ? float( normalizer->fkv3.Forward( fka::fkv3::SampleToDouble( srcRow[sx] ) ) )
                   : normalizer->Forward( ToNormFloat( srcRow[sx] ) );
             }
          }
@@ -1044,8 +1044,8 @@ public:
             if ( !C.upscale )
             {
                std::lock_guard<std::mutex> guard( m_data.fusionMutex );
-               if ( normalizer->scheme == FKNormalizer::ML5 )
-                  fka::ml5::BlendTile( outBuf.data(), C.outS.c, outTW, outTH,
+               if ( normalizer->scheme == FKNormalizer::FKv3 )
+                  fka::fkv3::BlendTile( outBuf.data(), C.outS.c, outTW, outTH,
                      x, y, W, H, (*m_data.xWindows)[size_t( r % nx )],
                      (*m_data.yWindows)[size_t( r / nx )],
                      [&]( int c, size_t i, double value ) { (*m_data.modelAcc)[size_t( c )][i] += value; } );
@@ -1135,13 +1135,13 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
    std::vector<int> ys, xs;
    int outTH = C.outTileH, outTW = C.outTileW;
 
-   const bool ml5 = C.normalizer.scheme == FKNormalizer::ML5;
-   if ( ml5 )
+   const bool fkv3 = C.normalizer.scheme == FKNormalizer::FKv3;
+   if ( fkv3 )
    {
       // Match the host's double model-space sum, with one inverse after
       // fusion. The seam windows define the sum; do not divide by wsum.
       modelAcc.assign( size_t( C.outS.c ), std::vector<double>( plane, 0.0 ) );
-      const fka::ml5::AxisGrid gx( W, outTW, C.tileOverlap ), gy( H, outTH, C.tileOverlap );
+      const fka::fkv3::AxisGrid gx( W, outTW, C.tileOverlap ), gy( H, outTH, C.tileOverlap );
       xs = gx.origins;
       ys = gy.origins;
       for ( size_t k = 0; k < xs.size(); ++k ) xWindows.push_back( gx.Window( k ) );
@@ -1295,7 +1295,7 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
       }
    threads.Destroy();
 
-   if ( C.verbose && !ml5 )
+   if ( C.verbose && !fkv3 )
    {
       // Main-thread diagnostics: accumulate stats before writing back.
       double amin = 1e30, amax = -1e30, asum = 0; size_t anz = 0;
@@ -1322,8 +1322,8 @@ void RunPipeline( pcl::GenericImage<P>& img, const RunConfig& C )
    }
 
    // 3. Write results back.
-   if ( ml5 )
-      WriteML5T( img, C.normalizer.ml5, modelAcc, C.replicate );
+   if ( fkv3 )
+      WriteFKv3T( img, C.normalizer.fkv3, modelAcc, C.replicate );
    else if ( !C.upscale && C.isCFA )
    {
       // Re-mosaic: keep the raw Bayer structure, sample the channel that
@@ -1601,15 +1601,15 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
    C.verbose = p_verbose;
    C.reflectPad = p_reflectPad;
 
-   // ---- normalization scheme ----
+   // ---- processing scheme ----
    //   None : pixels pass through, 5 user parameter slots only.
    //   FKv1 : log/MTF/affine curve. FKv2 : calibrated PCHIP curve.
    //          Both write column 5 as log10gain. wp and FKv2 selection use P35.
    const int normScheme = int( p_normScheme );
-   if ( normScheme < FKNormalizer::None || normScheme > FKNormalizer::ML5 )
-      throw pcl::Error( "fk-astro: unknown normalization scheme." );
-   const bool ml5 = normScheme == FKNormalizer::ML5;
-   fka::ml5::Settings controls;
+   if ( normScheme < FKNormalizer::None || normScheme > FKNormalizer::FKv3 )
+      throw pcl::Error( "fk-astro: unknown processing scheme." );
+   const bool fkv3 = normScheme == FKNormalizer::FKv3;
+   fka::fkv3::Settings controls;
    controls.stars = p_sharpenStars;
    controls.halos = p_adjustStarHalos;
    controls.diameter = p_psfDiameter;
@@ -1617,28 +1617,28 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
    controls.autoPSF = p_autoPSF;
    controls.correctOnly = p_correctOnly;
    controls.lunar = p_lunarPlanetary;
-   const fka::ml5::Settings effective = controls.Effective();
+   const fka::fkv3::Settings effective = controls.Effective();
    const bool needs6 = ( normScheme >= 1 );
    double bg = 0.0, slot5 = 0.0;
-   if ( ml5 )
+   if ( fkv3 )
    {
       if ( inS.c != 3 || inS.h != 1024 || inS.w != 1024
            || outS.c != 3 || outS.h != 512 || outS.w != 512
            || !engine.HasParamsInput() || engine.ParamsSize() != 6 )
-         throw pcl::Error( "fk-astro: ML5 requires 1024x1024x3 input, "
+         throw pcl::Error( "fk-astro: FKv3 requires 1024x1024x3 input, "
                            "512x512x3 output and exactly 6 parameters." );
       const int cfa = view.Window().FileInfo().cfaType;
       if ( cfa >= pcl::CFAType::BGGR && cfa <= pcl::CFAType::RGGB )
-         throw pcl::Error( "fk-astro: debayer the CFA image before using ML5." );
-      C.normalizer.scheme = FKNormalizer::ML5;
-      C.normalizer.ml5 = FitML5( image, effective.lunar );
+         throw pcl::Error( "fk-astro: debayer the CFA image before using FKv3." );
+      C.normalizer.scheme = FKNormalizer::FKv3;
+      C.normalizer.fkv3 = FitFKv3( image, effective.lunar );
       C.reflectPad = false; // ML5 catalog: reflectionPad=false
-      slot5 = C.normalizer.ml5.gain;
+      slot5 = C.normalizer.fkv3.gain;
       if ( p_verbose )
       {
-         const auto& n = C.normalizer.ml5;
+         const auto& n = C.normalizer.fkv3;
          pcl::Console().WriteLn( pcl::IsoString().Format(
-            "fk-astro: ML5 arcsinh,wp=1: low=%.17g high=%.17g median=%.17g "
+            "fk-astro: FKv3 arcsinh,wp=1: low=%.17g high=%.17g median=%.17g "
             "x=%.17g log10gain=%.17g; grid=%dx%d positive=%zu lp=%s",
             n.low, n.high, n.median, n.x, n.gain, n.gridW, n.gridH,
             n.positiveSamples, effective.lunar ? "on" : "off" ).c_str() );
@@ -1684,9 +1684,9 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
    if ( engine.HasParamsInput() )
    {
       C.params.assign( engine.ParamsSize(), 0.0f );
-      if ( ml5 )
+      if ( fkv3 )
       {
-         const auto values = controls.Parameters( C.normalizer.ml5.gain );
+         const auto values = controls.Parameters( C.normalizer.fkv3.gain );
          std::copy( values.begin(), values.end(), C.params.begin() );
       }
       else if ( p_correctOnly )
@@ -1740,15 +1740,15 @@ bool FKAstroInferenceInstance::ExecuteOn( pcl::View& view )
          if ( p_correctOnly )
             pmsg << "  (correct only: adjustments neutralized)";
          if ( !needs6 && C.params.size() > 5 )
-            pmsg << "  (slot 5 left at 0; select ML5 for the ML5 contract)";
+            pmsg << "  (slot 5 left at 0; select FKv3 for the ML5 contract)";
       }
       else
          pmsg = "fk-astro: params: model has no parameters input";
       pcl::Console().WriteLn( pcl::String( pmsg ) );
       pcl::Console().WriteLn( pcl::IsoString().Format(
          "fk-astro: lunarPlanetary=%s%s",
-         ( ml5 ? effective.lunar : p_lunarPlanetary ) ? "on" : "off",
-         ml5 ? " (effective ML5 mode)" : " (stored flag; legacy path)" ).c_str() );
+         ( fkv3 ? effective.lunar : p_lunarPlanetary ) ? "on" : "off",
+         fkv3 ? " (effective FKv3 mode)" : " (stored flag; legacy path)" ).c_str() );
    }
 
    // ---- channel mapping ----

@@ -7,7 +7,7 @@
  *   Model                 — model path
  *   Stellar Adjustments   — Sharpen Stars, Adjust Star Halos
  *   Nonstellar Adjustments — Sharpen Nonstellar, Automatic PSF, PSF Diameter
- *   Options               — Correct Only, Lunar/Planetary, Normalization (None / FKv1 / FKv2)
+ *   Options               — Correct Only, Lunar/Planetary, Processing scheme (None / FKv1 / FKv2 / FKv3)
  *   Additional Options    — Tile Overlap, Reflect Padding, Compute Device, Verbose
  */
 
@@ -54,7 +54,7 @@ private:
    void e_Verbose( pcl::Button& sender, pcl::Button::check_state state );
    void e_Section( pcl::SectionBar& sender, pcl::Control& section, bool start );
 
-   // Apply Correct Only and ML5 Lunar/Planetary disabledIf rules.
+   // Apply Correct Only and FKv3 Lunar/Planetary disabledIf rules.
    void UpdateEnabledStates();
 
    // Interface state (valid before GUI exists)
@@ -66,7 +66,7 @@ private:
    double      m_psfDiameter  = 0.0;         // [0, 8]
    bool        m_correctOnly  = true;
    bool        m_lunarPlanetary = false;
-   int         m_normScheme   = 3;    // 0=None 1=FKv1 2=FKv2 3=ML5
+   int         m_normScheme   = 3;    // 0=None 1=FKv1 2=FKv2 3=FKv3
    bool        m_reflectPad   = true;
    double      m_tileOverlap  = 0.2;         // fraction [0, 0.5]
    int         m_device       = 0;

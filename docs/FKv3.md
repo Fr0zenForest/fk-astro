@@ -1,8 +1,12 @@
-# ML5 宿主流程
+# FKv3 宿主处理方案
 
-`normScheme=ML5` 是新实例的默认选项，按静态恢复的 ML5 调用约定运行。原有枚举值 `None=0/FKv1=1/FKv2=2` 保持不变，新增 `ML5=3`；加载旧进程实例仍使用其保存的方案。FKv1/FKv2 保留作旧实现对照，不能当成新路径的精度证明。
+`normScheme=FKv3` 是新实例的默认选项，按静态恢复的 ML5 调用约定运行。原有枚举值 `None=0/FKv1=1/FKv2=2` 保持不变，新增 `FKv3=3`；加载旧进程实例仍使用其保存的方案。FKv1/FKv2 保留作旧实现对照，不能当成新路径的精度证明。
 
-目标是让后续自有模型的训练和推理使用同一套宿主约定。ML5 选项要求图像端口为 1024×1024×3、输出为中心 512×512×3、参数恰好 6 个。CoreML 适配层在内部 CHW 缓冲与模型原生 CHW/HWC（可带单例 batch）之间按实际 strides 搬运；优先选择 `input/parameters/output` 命名端口。
+目标是让后续自有模型的训练和推理使用同一套宿主约定。FKv3 选项要求图像端口为 1024×1024×3、输出为中心 512×512×3、参数恰好 6 个。CoreML 适配层在内部 CHW 缓冲与模型原生 CHW/HWC（可带单例 batch）之间按实际 strides 搬运；优先选择 `input/parameters/output` 命名端口。
+
+FKv3 是本项目的宿主处理方案名，ML5 是它目前对应的官方模型版本；模型仍通过 Model path 独立选择。
+界面入口为 Options → Processing scheme → FKv3。此前使用 `ML5` 枚举名的脚本须改用 `FKv3`；
+参数 ID `normScheme`、数值 3、默认选择和算法保持不变。
 
 ## 归一化状态
 
@@ -23,7 +27,7 @@ params[5]  = float32(log10(x/a))
 Inverse(y) = low + (sinh(y×a)/x)×(high−low)
 ```
 
-拟合时过滤非正值，Forward 本身不裁掉负值，也不 clamp。越界块区域直接填模型域 0，只有有效图像区域执行 Forward；这与先补原图 0 再归一化不同。ML5 忽略 Reflect border padding 控件，固定零填充。
+拟合时过滤非正值，Forward 本身不裁掉负值，也不 clamp。越界块区域直接填模型域 0，只有有效图像区域执行 Forward；这与先补原图 0 再归一化不同。FKv3 忽略 Reflect border padding 控件，固定零填充。
 
 ## 六列及模式
 
@@ -60,7 +64,7 @@ pitch = float32(D/n)
 
 重叠区域写入由互斥锁保护。模型域全图累加器为 double，RGB 需要约 `W×H×3×8` 字节；原图仍由 reader 按块读取。模块编译关闭 fast-math 和隐式乘加收缩，保留原点计算中的精度边界，已确认的 FMA 用 std::fma 表达。PCL 库保持原编译选项。
 
-单色图复制到三个模型输入通道，融合后在模型域平均三个通道再逆变换；这是本模块的单色适配约定，尚未对官方非相同三通道输出验证。ML5 当前要求 CFA 图先去马赛克，避免把旧的逐块 CFA 插值路径误认为已对齐的官方流程。旧方案的 CFA 和通用模型路径保留。
+单色图复制到三个模型输入通道，融合后在模型域平均三个通道再逆变换；这是本模块的单色适配约定，尚未对官方非相同三通道输出验证。FKv3 当前要求 CFA 图先去马赛克，避免把旧的逐块 CFA 插值路径误认为已对齐的官方流程。旧方案的 CFA 和通用模型路径保留。
 
 ## 证据和验证范围
 
@@ -91,8 +95,8 @@ pitch = float32(D/n)
 python tests/run_offline.py
 ```
 
-Windows 使用 Visual Studio C++ Build Tools，macOS/Linux 使用 clang++ 或 g++。只需要 Python 标准库，无模型文件。测试编译生产头文件，并直接提取生产 FKNormalizer、FitML5T、FKImageReaderT、WriteML5T 及张量元素读写函数，使用内存图像适配器执行。
+Windows 使用 Visual Studio C++ Build Tools，macOS/Linux 使用 clang++ 或 g++。只需要 Python 标准库，无模型文件。测试编译生产头文件，并直接提取生产 FKNormalizer、FitFKv3T、FKImageReaderT、WriteFKv3T 及张量元素读写函数，使用内存图像适配器执行。
 
 覆盖 17 类：正样本为空、上中位数、最近邻坐标、通道汇总、分位插值、退化跨度、独立离线数值基准、模式/六列、正逆变换、浮点/整型精度、零填充、原点、接缝、融合顺序、小图 RGB/单色、多块中心原样返回和张量 strides。
 
-这证明的是宿主算法和合成探针行为。完整 PCL/Objective-C++ 模块、CoreML 预测、设备误差、官方六阶段运行采集和实际成图精度尚未在本轮验证。跨平台 asinh/log10 及并发累加顺序仍可能产生末位差异。历史 FKv2 的成图表不适用于此 ML5 路径。
+这证明的是宿主算法和合成探针行为。完整 PCL/Objective-C++ 模块、CoreML 预测、设备误差、官方六阶段运行采集和实际成图精度尚未在本轮验证。跨平台 asinh/log10 及并发累加顺序仍可能产生末位差异。历史 FKv2 的成图表不适用于此 FKv3 路径。

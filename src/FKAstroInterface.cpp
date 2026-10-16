@@ -157,17 +157,17 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->LunarPlanetaryCheck.SetText( "Lunar/Planetary" );
       GUI->LunarPlanetaryCheck.SetChecked( m_lunarPlanetary );
       GUI->LunarPlanetaryCheck.SetToolTip(
-         "<p>With ML5, use the lunar/planetary normalization and a manual "
+         "<p>With FKv3, use the lunar/planetary normalization and a manual "
          "PSF diameter. Stellar adjustments and Automatic PSF are disabled. "
          "Correct Only overrides this mode.</p>" );
       GUI->LunarPlanetaryCheck.OnCheck(
          (pcl::Button::check_event_handler)&FKAstroInterface::e_LunarPlanetary, *this );
 
-      GUI->NormLabel.SetText( "Normalization:" );
+      GUI->NormLabel.SetText( "Processing scheme:" );
       GUI->NormCombo.AddItem( "None" );
       GUI->NormCombo.AddItem( "FKv1" );
       GUI->NormCombo.AddItem( "FKv2" );
-      GUI->NormCombo.AddItem( "ML5" );
+      GUI->NormCombo.AddItem( "FKv3" );
       GUI->NormCombo.SetCurrentItem( m_normScheme );
       GUI->NormCombo.SetToolTip(
          "<p><b>None</b> — pixels are passed to the model unchanged and the "
@@ -185,7 +185,8 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
          "is selected and evaluated with monotone PCHIP interpolation, with "
          "the inverse saturating at the curve endpoints. Out-of-range "
          "window pixels are zero-filled.</p>"
-         "<p><b>ML5</b> (default) — fit an arcsinh transform to the whole "
+         "<p><b>FKv3</b> (default, recovered ML5 host flow) — fit an arcsinh "
+         "transform to the whole "
          "image with white point 1. The sixth parameter uses the gain of "
          "this same transform. Tiles use zero padding and are blended before "
          "the inverse transform. Requires 1024x1024x3 input, 512x512x3 "
@@ -217,7 +218,7 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->TileOverlap.SetPrecision( 2 );
       GUI->TileOverlap.SetValue( m_tileOverlap );
       GUI->TileOverlap.SetToolTip(
-         "<p>Overlap fraction, range 0.0 – 0.5, default 0.2. ML5 uses "
+         "<p>Overlap fraction, range 0.0 – 0.5, default 0.2. FKv3 uses "
          "this value for both the tile count and cosine transition width.</p>" );
       GUI->TileOverlap.OnValueUpdated(
          (pcl::NumericEdit::value_event_handler)&FKAstroInterface::e_Overlap, *this );
@@ -226,7 +227,7 @@ bool FKAstroInterface::Launch( const pcl::MetaProcess&,
       GUI->ReflectPadCheck.SetChecked( m_reflectPad );
       GUI->ReflectPadCheck.SetToolTip(
          "<p>Mirror the image at borders when a tile window extends past "
-         "the edge. Unchecked: replicate edge pixels. ML5 always uses "
+         "the edge. Unchecked: replicate edge pixels. FKv3 always uses "
          "zero padding.</p>" );
       GUI->ReflectPadCheck.OnCheck(
          (pcl::Button::check_event_handler)&FKAstroInterface::e_ReflectPad, *this );
@@ -457,18 +458,18 @@ void FKAstroInterface::UpdateEnabledStates()
    if ( GUI == nullptr )
       return;
    const bool adjustmentsEnabled = !m_correctOnly;
-   const bool ml5 = m_normScheme == 3;
-   const bool lunar = ml5 && m_lunarPlanetary && adjustmentsEnabled;
+   const bool fkv3 = m_normScheme == 3;
+   const bool lunar = fkv3 && m_lunarPlanetary && adjustmentsEnabled;
    GUI->SharpenStars.Enable( adjustmentsEnabled && !lunar );
    GUI->AdjustStarHalos.Enable( adjustmentsEnabled && !lunar );
    GUI->SharpenNonstellar.Enable( adjustmentsEnabled );
    GUI->AutoPSFCheck.Enable( adjustmentsEnabled && !lunar );
    GUI->AutoPSFCheck.SetChecked( !adjustmentsEnabled || ( !lunar && m_autoPSF ) );
    GUI->PSFDiameter.Enable( adjustmentsEnabled && ( lunar || !m_autoPSF ) );
-   GUI->LunarPlanetaryCheck.Enable( adjustmentsEnabled && ml5 );
-   GUI->LunarPlanetaryCheck.SetChecked( ml5 && adjustmentsEnabled && m_lunarPlanetary );
-   GUI->ReflectPadCheck.Enable( !ml5 && m_normScheme != 2 );
-   GUI->ReflectPadCheck.SetChecked( !ml5 && m_normScheme != 2 && m_reflectPad );
+   GUI->LunarPlanetaryCheck.Enable( adjustmentsEnabled && fkv3 );
+   GUI->LunarPlanetaryCheck.SetChecked( fkv3 && adjustmentsEnabled && m_lunarPlanetary );
+   GUI->ReflectPadCheck.Enable( !fkv3 && m_normScheme != 2 );
+   GUI->ReflectPadCheck.SetChecked( !fkv3 && m_normScheme != 2 && m_reflectPad );
 }
 
 // ---------------------------------------------------------------------------

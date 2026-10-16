@@ -1,4 +1,4 @@
-#include "ML5Pipeline.h"
+#include "FKv3Pipeline.h"
 #include "TensorLayout.h"
 #include "CoreMLEngine.h"
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include <string>
 #include "module_reader.inc" // generated from the actual process source
 
-using namespace fka::ml5;
+using namespace fka::fkv3;
 
 static void Check( bool value, const char* message )
 {
@@ -35,8 +35,8 @@ static void ReaderRoundtrip( int width, int height, int channels )
             image.pixels[size_t( c )*width*height + size_t( y )*width+x] =
                float( 0.003 + 0.01*c + 0.3*x/width + 0.1*y/height );
    FKNormalizer norm;
-   norm.scheme = FKNormalizer::ML5;
-   norm.ml5 = FitML5T( image, false );
+   norm.scheme = FKNormalizer::FKv3;
+   norm.fkv3 = FitFKv3T( image, false );
    FKImageReaderT<TestFloat> reader( image );
    reader.normalizer = &norm;
    AxisGrid gx( width, 512, 0.2 ), gy( height, 512, 0.2 );
@@ -56,7 +56,7 @@ static void ReaderRoundtrip( int width, int height, int channels )
             [&]( int c, size_t pixel, double value ) { acc[size_t( c )][pixel] += value; } );
       }
    const auto original = image.pixels;
-   WriteML5T( image, norm.ml5, acc, channels == 1 );
+   WriteFKv3T( image, norm.fkv3, acc, channels == 1 );
    for ( int c = 0; c < channels; ++c )
       for ( size_t i = 0; i < size_t( width )*height; ++i )
          Near( image.pixels[size_t( c )*width*height+i], original[size_t( c )*width*height+i], 8e-8,
@@ -143,14 +143,14 @@ int main()
       run( "float64 and integer sample precision", []
       {
          pcl::GenericImage<TestDouble> image( 1,1,1 ); image.pixels[0]=0.100000000002;
-         FKNormalizer norm; norm.scheme=FKNormalizer::ML5; norm.ml5=FitML5T(image,false);
+         FKNormalizer norm; norm.scheme=FKNormalizer::FKv3; norm.fkv3=FitFKv3T(image,false);
          FKImageReaderT<TestDouble> reader(image); reader.normalizer=&norm;
          float value=1; reader.ReadTile(&value,0,0,0,fka::TensorShape{1,1,1},false,false);
          Near(value,0,1e-12,"do not cast double pixels to float before normalization");
          Near(SampleToDouble(uint16_t(12345)),12345.0/65535.0,1e-16,"integer conversion in double");
          pcl::GenericImage<TestUInt16> integer(1,1,1); integer.pixels[0]=12345;
-         const auto state=FitML5T(integer,false);
-         WriteML5T(integer,state,std::vector<std::vector<double>>(3,std::vector<double>(1,0)),true);
+         const auto state=FitFKv3T(integer,false);
+         WriteFKv3T(integer,state,std::vector<std::vector<double>>(3,std::vector<double>(1,0)),true);
          Check(integer.pixels[0]==12345,"integer output must be scaled and rounded");
          Check(SampleFromDouble<uint8_t>(.5/255)==0 && SampleFromDouble<uint8_t>(1.5/255)==2
                && SampleFromDouble<uint8_t>(2.5/255)==2,"integer half ties round to even");
@@ -158,7 +158,7 @@ int main()
       run( "padding is model zero, valid zero is transformed", []
       {
          pcl::GenericImage<TestFloat> image(2,1,1); image.pixels={0.0f,0.005f};
-         FKNormalizer norm; norm.scheme=FKNormalizer::ML5; norm.ml5=FitML5T(image,false);
+         FKNormalizer norm; norm.scheme=FKNormalizer::FKv3; norm.fkv3=FitFKv3T(image,false);
          FKImageReaderT<TestFloat> reader(image); reader.normalizer=&norm; reader.reflectPad=true;
          float values[4]={}; reader.ReadTile(values,0,-1,0,fka::TensorShape{1,1,4},false,false);
          Check(values[0]==0 && values[1]<0 && values[2]==0 && values[3]==0,"padding must bypass Forward even when reflectPad was saved on");

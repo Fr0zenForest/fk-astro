@@ -1,4 +1,4 @@
-"""Compile and run the production ML5 math and extracted image reader offline.
+"""Compile and run the production FKv3 math and extracted image reader offline.
 
 Requires a C++17 compiler (MSVC Build Tools on Windows, clang++/g++ elsewhere).
 No PCL installation, CoreML, model package, weights or Python packages needed.
@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / 'build' / 'ml5-tests'
+BUILD = ROOT / 'build' / 'fkv3-tests'
 
 
 def definition(source, marker):
@@ -49,8 +49,8 @@ struct TestDouble { using sample=double; };
 struct TestUInt16 { using sample=uint16_t; static uint16_t HighestSampleValue() { return 65535; } };
 '''
     markers = ['template <typename S>', 'struct FKNormalizer',
-               'template <class P>\nstatic fka::ml5::ArcsinhNormalizer FitML5T',
-               'template <class P>\nstatic void WriteML5T',
+               'template <class P>\nstatic fka::fkv3::ArcsinhNormalizer FitFKv3T',
+               'template <class P>\nstatic void WriteFKv3T',
                'struct FKImageReader\n', 'template <class P>\nstruct FKImageReaderT']
     generated = '#include "FKCurves.h"\n' + adapter + '\n\n'.join(definition(source, m) for m in markers)
     engine = (ROOT / 'src/CoreMLEngine.mm').read_text(encoding='utf-8-sig')
@@ -59,8 +59,8 @@ struct TestUInt16 { using sample=uint16_t; static uint16_t HighestSampleValue() 
         generated += definition(engine, marker) + '\n'
     generated += '}\n'
     (BUILD / 'module_reader.inc').write_text(generated, encoding='utf-8')
-    test = ROOT / 'tests/ml5_contract_test.cpp'
-    executable = BUILD / ('ml5-tests.exe' if os.name == 'nt' else 'ml5-tests')
+    test = ROOT / 'tests/fkv3_contract_test.cpp'
+    executable = BUILD / ('fkv3-tests.exe' if os.name == 'nt' else 'fkv3-tests')
     if os.name == 'nt':
         vswhere = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Microsoft Visual Studio/Installer/vswhere.exe'
         install = subprocess.check_output([str(vswhere), '-latest', '-products', '*', '-requires',

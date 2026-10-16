@@ -144,10 +144,10 @@ public:
    }
 };
 
-// Normalization scheme: None = 5 user slots.
+// Processing scheme: None = 5 user slots.
 // FKv1 = log/MTF/affine around wp = 0.505*P35.
 // FKv2 = calibrated curve selected from that same P35.
-// ML5 = fitted arcsinh,wp=1, paired with its own log10gain in column 5.
+// FKv3 = recovered ML5 host flow: fitted arcsinh,wp=1 and paired log10gain.
 class FKNormSchemeParameter : public pcl::MetaEnumeration
 {
 public:
@@ -165,7 +165,7 @@ public:
    }
    pcl::IsoString ElementId( pcl::size_type idx ) const override
    {
-      return (idx == 0) ? "None" : (idx == 1) ? "FKv1" : (idx == 2) ? "FKv2" : "ML5";
+      return (idx == 0) ? "None" : (idx == 1) ? "FKv1" : (idx == 2) ? "FKv2" : "FKv3";
    }
    int ElementValue( pcl::size_type idx ) const override
    {
@@ -320,9 +320,9 @@ public:
    double      p_psfDiameter  = 0.0;         // [0, 8], used when !p_autoPSF
    double      p_tileOverlap  = 0.2;         // fraction of tile size, [0, 0.5]
    bool        p_correctOnly  = true;
-   // ML5 mode: controls normalization and effective parameter overrides.
+   // FKv3 mode: controls normalization and effective parameter overrides.
    bool        p_lunarPlanetary = false;
-   pcl::pcl_enum p_normScheme = 3;    // 0=None 1=FKv1 2=FKv2 3=ML5
+   pcl::pcl_enum p_normScheme = 3;    // 0=None 1=FKv1 2=FKv2 3=FKv3
    bool        p_reflectPad   = true;
    pcl::pcl_enum p_device       = 0;  // 0=Auto 1=GPU 2=CPU
    bool        p_verbose      = true;
